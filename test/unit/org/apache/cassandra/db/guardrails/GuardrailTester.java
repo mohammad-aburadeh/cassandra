@@ -25,6 +25,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.TreeSet;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.BiConsumer;
@@ -51,6 +52,7 @@ import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.guardrails.GuardrailEvent.GuardrailEventType;
 import org.apache.cassandra.db.view.View;
 import org.apache.cassandra.diag.DiagnosticEventService;
+import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.index.sasi.SASIIndex;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.ClientWarn;
@@ -67,6 +69,18 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
+/**
+ * This class provides specific utility methods for testing Guardrails that should be used instead of the provided
+ * {@link CQLTester} methods. Many of the methods in CQLTester don't respect the {@link ClientState} provided for a query
+ * and instead use {@link ClientState#forInternalCalls()} which flags as an internal query and thus bypasses auth and
+ * guardrail checks.
+ *
+ * Some GuardrailTester methods and their usage is as follows:
+ *      {@link GuardrailTester#assertValid(String)} to confirm the query as structured is valid given the state of the db
+ *      {@link GuardrailTester#assertWarns(String, String)} to confirm a query succeeds but warns the text provided
+ *      {@link GuardrailTester#assertFails(String, String)} to confirm a query fails with the message provided
+ *      {@link GuardrailTester#testExcludedUsers} to confirm superusers are excluded from application of the guardrail
+ */
 public abstract class GuardrailTester extends CQLTester
 {
     // Name used when testing CREATE TABLE that should be aborted (we need to provide it as assertFails, which
@@ -98,15 +112,21 @@ public abstract class GuardrailTester extends CQLTester
     }
 
     @BeforeClass
-    public static void setUpClass()
+    public static void setUpState()
     {
-        CQLTester.setUpClass();
         requireAuthentication();
         requireNetwork();
         DatabaseDescriptor.setDiagnosticEventsEnabled(true);
-
         systemClientState = ClientState.forInternalCalls();
+
         userClientState = ClientState.forExternalCalls(InetSocketAddress.createUnresolved("127.0.0.1", 123));
+        AuthenticatedUser user = new AuthenticatedUser(USERNAME)
+        {
+            @Override
+            public boolean canLogin() { return true; }
+        };
+        userClientState.login(user);
+
         superClientState = ClientState.forExternalCalls(InetSocketAddress.createUnresolved("127.0.0.1", 321));
         superClientState.login(new AuthenticatedUser(CassandraRoleManager.DEFAULT_SUPERUSER_NAME));
     }
@@ -198,7 +218,7 @@ public abstract class GuardrailTester extends CQLTester
             listener.assertNotWarned();
             listener.assertNotFailed();
         }
-        catch (GuardrailViolatedException e)
+        catch (InvalidRequestException e)
         {
             fail("Expected not to fail, but failed with error message: " + e.getMessage());
         }
@@ -268,6 +288,32 @@ public abstract class GuardrailTester extends CQLTester
         }
     }
 
+    protected ResultMessage assertWarnsWithResult(CheckedSupplier supplier, String message, String redactedMessage) throws Throwable
+    {
+        return assertWarnsWithResult(supplier, Collections.singletonList(message), Collections.singletonList(redactedMessage));
+    }
+
+    protected ResultMessage assertWarnsWithResult(CheckedSupplier supplier, List<String> messages, List<String> redactedMessages) throws Throwable
+    {
+        // We use client warnings to check we properly warn as this is the most convenient. Technically,
+        // this doesn't validate we also log the warning, but that's probably fine ...
+        ClientWarn.instance.captureWarnings();
+        try
+        {
+            ResultMessage message = supplier.get();
+            assertWarnings(messages);
+            listener.assertWarned(redactedMessages);
+            listener.assertNotFailed();
+
+            return message;
+        }
+        finally
+        {
+            ClientWarn.instance.resetWarnings();
+            listener.clear();
+        }
+    }
+
     protected void assertFails(String query, String message) throws Throwable
     {
         assertFails(query, message, message);
@@ -318,17 +364,41 @@ public abstract class GuardrailTester extends CQLTester
         assertFails(function, true, messages, redactedMessages);
     }
 
-    protected void assertFails(CheckedFunction function, boolean thrown, List<String> messages, List<String> redactedMessages) throws Throwable
+    /**
+     * Unlike {@link CQLTester#assertInvalidThrowMessage}, the chain of methods ending here in {@link GuardrailTester}
+     * respect the input ClientState so guardrails permissions will be correctly checked.
+     */
+    protected Optional<ResultMessage> assertFails(CheckedFunction function, boolean thrown, List<String> messages, List<String> redactedMessages) throws Throwable
+    {
+        return assertFailsInternal(function, thrown, messages, redactedMessages);
+    }
+
+    protected Optional<ResultMessage> assertFails(CheckedSupplier supplier, boolean thrown, List<String> messages, List<String> redactedMessages) throws Throwable
+    {
+        return assertFailsInternal(supplier, thrown, messages, redactedMessages);
+    }
+
+    private Optional<ResultMessage> assertFailsInternal(Object functionOrSupplier, boolean thrown, List<String> messages, List<String> redactedMessages) throws Throwable
     {
         ClientWarn.instance.captureWarnings();
         try
         {
-            function.apply();
+            ResultMessage resultMessage = null;
+            if (functionOrSupplier instanceof CheckedFunction)
+            {
+                ((CheckedFunction) functionOrSupplier).apply();
+            }
+            else if (functionOrSupplier instanceof CheckedSupplier)
+            {
+                resultMessage = ((CheckedSupplier) functionOrSupplier).get();
+            }
 
             if (thrown)
                 fail("Expected to fail, but it did not");
+
+            return Optional.ofNullable(resultMessage);
         }
-        catch (GuardrailViolatedException e)
+        catch (InvalidRequestException e) // TODO: this used to catch GuardrailViolatedException, but now we throw InvalidRequestException for all rejections in Schema#submit
         {
             assertTrue("Expect no exception thrown", thrown);
 
@@ -337,26 +407,39 @@ public abstract class GuardrailTester extends CQLTester
 
             if (guardrail != null)
             {
-                String prefix = guardrail.decorateMessage("");
-                assertTrue(format("Full error message '%s' doesn't start with the prefix '%s'", e.getMessage(), prefix),
-                           e.getMessage().startsWith(prefix));
+                String message = e.getMessage();
+                String prefix = guardrail.decorateMessage("").replace(". " + guardrail.reason, "");
+                assertTrue(format("Full error message '%s' doesn't start with the prefix '%s'", message, prefix),
+                           message.startsWith(prefix));
+
+                String reason = guardrail.reason;
+                if (reason != null)
+                {
+                    assertTrue(format("Full error message '%s' doesn't end with the reason '%s'", message, reason),
+                               message.endsWith(reason));
+                }
             }
 
             assertTrue(format("Full error message '%s' does not contain expected message '%s'", e.getMessage(), failMessage),
                        e.getMessage().contains(failMessage));
 
-            assertWarnings(messages);
-            if (messages.size() > 1)
-                listener.assertWarned(redactedMessages.subList(0, messages.size() - 1));
-            else
-                listener.assertNotWarned();
-            listener.assertFailed(redactedMessages.get(messages.size() - 1));
+            if (e instanceof GuardrailViolatedException)
+            {
+                assertWarnings(messages);
+                if (messages.size() > 1)
+                    listener.assertWarned(redactedMessages.subList(0, messages.size() - 1));
+                else
+                    listener.assertNotWarned();
+                listener.assertFailed(redactedMessages.get(messages.size() - 1));
+            }
         }
         finally
         {
             ClientWarn.instance.resetWarnings();
             listener.clear();
         }
+
+        return Optional.empty();
     }
 
     protected void assertFails(String query, String... messages) throws Throwable
@@ -396,9 +479,16 @@ public abstract class GuardrailTester extends CQLTester
             String warning = warnings.get(i);
             if (guardrail != null)
             {
-                String prefix = guardrail.decorateMessage("");
+                String prefix = guardrail.decorateMessage("").replace(". " + guardrail.reason, "");
                 assertTrue(format("Warning log message '%s' doesn't start with the prefix '%s'", warning, prefix),
                            warning.startsWith(prefix));
+
+                String reason = guardrail.reason;
+                if (reason != null)
+                {
+                    assertTrue(format("Warning log message '%s' doesn't end with the reason '%s'", warning, reason),
+                               warning.endsWith(reason));
+                }
             }
 
             assertTrue(format("Warning log message '%s' does not contain expected message '%s'", warning, message),
@@ -478,6 +568,10 @@ public abstract class GuardrailTester extends CQLTester
         return execute(state, query, options);
     }
 
+    /**
+     * Performs execution of query using the input {@link ClientState} (i.e. unlike {@link ClientState#forInternalCalls()}
+     * which may not) to ensure guardrails are approprieately applied to the query provided.
+     */
     protected ResultMessage execute(ClientState state, String query, QueryOptions options)
     {
         QueryState queryState = new QueryState(state);

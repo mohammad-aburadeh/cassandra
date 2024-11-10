@@ -17,8 +17,6 @@
  */
 package org.apache.cassandra.db;
 
-import java.io.IOException;
-
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.MessagingService;
@@ -27,15 +25,6 @@ public class ReadRepairVerbHandler extends AbstractMutationVerbHandler<Mutation>
 {
     public static final ReadRepairVerbHandler instance = new ReadRepairVerbHandler();
 
-    @Override
-    public void doVerb(Message<Mutation> message) throws IOException
-    {
-        // This method exists as python dtest relies on byte-code rewriting via Byteman, so requires this
-        // class defines a "doVerb" method for some tests.
-        super.doVerb(message);
-    }
-
-    @Override
     void applyMutation(Message<Mutation> message, InetAddressAndPort respondToAddress)
     {
         message.payload.apply();

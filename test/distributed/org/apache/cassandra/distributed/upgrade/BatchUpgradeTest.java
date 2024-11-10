@@ -22,6 +22,7 @@ import org.junit.Test;
 
 import org.apache.cassandra.Util;
 import org.apache.cassandra.distributed.api.ConsistencyLevel;
+import org.apache.cassandra.distributed.api.Feature;
 
 import static org.junit.Assert.assertEquals;
 
@@ -33,7 +34,8 @@ public class BatchUpgradeTest extends UpgradeTestBase
         new TestCase()
         .nodes(2)
         .nodesToUpgrade(2)
-        .upgradesFrom(v40).setup((cluster) -> {
+        .withConfig(c -> c.with(Feature.GOSSIP))
+        .upgradesToCurrentFrom(v40).setup((cluster) -> {
             cluster.schemaChange("CREATE TABLE " + KEYSPACE + ".users (" +
                                  "userid uuid PRIMARY KEY," +
                                  "firstname ascii," +

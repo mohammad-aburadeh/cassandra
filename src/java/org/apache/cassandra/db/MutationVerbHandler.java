@@ -41,7 +41,6 @@ public class MutationVerbHandler extends AbstractMutationVerbHandler<Mutation>
         Tracing.trace("Payload application resulted in WriteTimeout, not replying");
     }
 
-    @Override
     public void doVerb(Message<Mutation> message)
     {
         if (approxTime.now() > message.expiresAtNanos())
@@ -69,7 +68,6 @@ public class MutationVerbHandler extends AbstractMutationVerbHandler<Mutation>
         }
     }
 
-    @Override
     protected void applyMutation(Message<Mutation> message, InetAddressAndPort respondToAddress)
     {
         message.payload.applyFuture().addCallback(o -> respond(message, respondToAddress), wto -> failed());
@@ -82,14 +80,13 @@ public class MutationVerbHandler extends AbstractMutationVerbHandler<Mutation>
                    .withParam(ParamType.RESPOND_TO, originalMessage.from())
                    .withoutParam(ParamType.FORWARD_TO);
 
-        boolean useSameMessageID = forwardTo.useSameMessageID(originalMessage.id());
         // reuse the same Message if all ids are identical (as they will be for 4.0+ node originated messages)
-        Message<Mutation> message = useSameMessageID ? builder.build() : null;
+        Message<Mutation> message = builder.build();
 
         forwardTo.forEach((id, target) ->
         {
             Tracing.trace("Enqueuing forwarded write to {}", target);
-            MessagingService.instance().send(useSameMessageID ? message : builder.withId(id).build(), target);
+            MessagingService.instance().send(message, target);
         });
     }
 }

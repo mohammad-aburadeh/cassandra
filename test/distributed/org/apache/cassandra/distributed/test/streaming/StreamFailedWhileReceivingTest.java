@@ -39,8 +39,7 @@ import org.apache.cassandra.distributed.api.IInvokableInstance;
 import org.apache.cassandra.distributed.test.TestBaseImpl;
 import org.apache.cassandra.exceptions.StartupException;
 import org.apache.cassandra.io.sstable.Descriptor;
-import org.apache.cassandra.io.sstable.format.RangeAwareSSTableWriter;
-import org.apache.cassandra.io.sstable.format.SSTableFormat;
+import org.apache.cassandra.io.sstable.RangeAwareSSTableWriter;
 import org.apache.cassandra.io.sstable.format.Version;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.schema.Schema;
@@ -149,9 +148,9 @@ public class StreamFailedWhileReceivingTest extends TestBaseImpl
             return zuper.call();
         }
 
-        // ColumnFamilyStore.createWriter - for entire sstable streaming, before adding to LogTransaction
+        // ColumnFamilyStore.newSSTableDescriptor - for entire sstable streaming, before adding to LogTransaction
         @SuppressWarnings("unused")
-        public static Descriptor newSSTableDescriptor(File directory, Version version, SSTableFormat.Type format, @SuperCall Callable<Descriptor> zuper) throws Exception
+        public static Descriptor newSSTableDescriptor(File directory, Version version, @SuperCall Callable<Descriptor> zuper) throws Exception
         {
             if (isCaller(CassandraEntireSSTableStreamReader.class.getName(), "read"))
             // handles compressed and non-compressed

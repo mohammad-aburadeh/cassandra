@@ -40,6 +40,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.ParameterizedClass;
 import org.apache.cassandra.db.Mutation;
@@ -63,6 +64,7 @@ import org.apache.cassandra.utils.concurrent.UncheckedInterruptedException;
 
 import static org.apache.cassandra.db.commitlog.CommitLogSegment.Allocation;
 import static org.apache.cassandra.db.commitlog.CommitLogSegment.ENTRY_OVERHEAD_SIZE;
+import static org.apache.cassandra.utils.Clock.Global.nanoTime;
 import static org.apache.cassandra.utils.FBUtilities.updateChecksum;
 import static org.apache.cassandra.utils.FBUtilities.updateChecksumInt;
 
@@ -80,7 +82,7 @@ public class CommitLog implements CommitLogMBean
 
     final public AbstractCommitLogSegmentManager segmentManager;
 
-    public volatile CommitLogArchiver archiver;
+    public final CommitLogArchiver archiver;
     public final CommitLogMetrics metrics;
     final AbstractCommitLogService executor;
 
@@ -104,7 +106,8 @@ public class CommitLog implements CommitLogMBean
     CommitLog(CommitLogArchiver archiver, Function<CommitLog, AbstractCommitLogSegmentManager> segmentManagerProvider)
     {
         this.configuration = new Configuration(DatabaseDescriptor.getCommitLogCompression(),
-                                               DatabaseDescriptor.getEncryptionContext());
+                                               DatabaseDescriptor.getEncryptionContext(),
+                                               DatabaseDescriptor.getCommitLogWriteDiskAccessMode());
         DatabaseDescriptor.createAllDirectories();
 
         this.archiver = archiver;
@@ -201,8 +204,11 @@ public class CommitLog implements CommitLogMBean
         {
             Arrays.sort(files, new CommitLogSegment.CommitLogSegmentFileComparator());
             logger.info("Replaying {}", StringUtils.join(files, ", "));
+            long startTime = nanoTime();
             replayed = recoverFiles(files);
-            logger.info("Log replay complete, {} replayed mutations", replayed);
+            long endTime = nanoTime();
+            logger.info("Log replay complete, {} replayed mutations in {} ms", replayed,
+                        TimeUnit.NANOSECONDS.toMillis(endTime - startTime));
 
             for (File f : files)
                 segmentManager.handleReplayedSegment(f);
@@ -314,7 +320,7 @@ public class CommitLog implements CommitLogMBean
                 buffer.putInt((int) checksum.getValue());
 
                 // checksummed mutation
-                dos.write(dob.getData(), 0, size);
+                dos.write(dob.unsafeGetBufferAndFlip());
                 updateChecksum(checksum, buffer, buffer.position() - size, size);
                 buffer.putInt((int) checksum.getValue());
             }
@@ -346,7 +352,8 @@ public class CommitLog implements CommitLogMBean
      */
     public void discardCompletedSegments(final TableId id, final CommitLogPosition lowerBound, final CommitLogPosition upperBound)
     {
-        logger.trace("discard completed log segments for {}-{}, table {}", lowerBound, upperBound, id);
+        if (logger.isTraceEnabled())
+            logger.trace("discard completed log segments for {}-{}, table {}", lowerBound, upperBound, id);
 
         // Go thru the active segment files, which are ordered oldest to newest, marking the
         // flushed CF as clean, until we reach the segment file containing the CommitLogPosition passed
@@ -366,7 +373,7 @@ public class CommitLog implements CommitLogMBean
             {
                 if (logger.isTraceEnabled())
                     logger.trace("Not safe to delete{} commit log segment {}; dirty is {}",
-                            (iter.hasNext() ? "" : " active"), segment, segment.dirtyString());
+                                 (iter.hasNext() ? "" : " active"), segment, segment.dirtyString());
             }
 
             // Don't mark or try to delete any newer segments once we've reached the one containing the
@@ -404,12 +411,6 @@ public class CommitLog implements CommitLogMBean
     public String getRestorePrecision()
     {
         return archiver.precision.toString();
-    }
-
-    @VisibleForTesting
-    public void setCommitlogArchiver(CommitLogArchiver archiver)
-    {
-        this.archiver = archiver;
     }
 
     public List<String> getActiveSegmentNames()
@@ -459,11 +460,7 @@ public class CommitLog implements CommitLogMBean
     @Override
     public void setCDCBlockWrites(boolean val)
     {
-        Preconditions.checkState(DatabaseDescriptor.isCDCEnabled(),
-                                 "Unable to set block_writes (%s): CDC is not enabled.", val);
-        Preconditions.checkState(segmentManager instanceof CommitLogSegmentManagerCDC,
-                                 "CDC is enabled but we have the wrong CommitLogSegmentManager type: %s. " +
-                                 "Please report this as bug.", segmentManager.getClass().getName());
+        ensureCDCEnabled("Unable to set block_writes.");
         boolean oldVal = DatabaseDescriptor.getCDCBlockWrites();
         CommitLogSegment currentSegment = segmentManager.allocatingFrom();
         // Update the current segment CDC state to PERMITTED if block_writes is disabled now, and it was in FORBIDDEN state
@@ -471,6 +468,29 @@ public class CommitLog implements CommitLogMBean
             currentSegment.setCDCState(CommitLogSegment.CDCState.PERMITTED);
         DatabaseDescriptor.setCDCBlockWrites(val);
         logger.info("Updated CDC block_writes from {} to {}", oldVal, val);
+    }
+
+
+    @Override
+    public boolean isCDCOnRepairEnabled()
+    {
+        return DatabaseDescriptor.isCDCOnRepairEnabled();
+    }
+
+    @Override
+    public void setCDCOnRepairEnabled(boolean value)
+    {
+        ensureCDCEnabled("Unable to set cdc_on_repair_enabled.");
+        DatabaseDescriptor.setCDCOnRepairEnabled(value);
+        logger.info("Set cdc_on_repair_enabled to {}", value);
+    }
+
+    private void ensureCDCEnabled(String hint)
+    {
+        Preconditions.checkState(DatabaseDescriptor.isCDCEnabled(), "CDC is not enabled. %s", hint);
+        Preconditions.checkState(segmentManager instanceof CommitLogSegmentManagerCDC,
+                                 "CDC is enabled but we have the wrong CommitLogSegmentManager type: %s. " +
+                                 "Please report this as bug.", segmentManager.getClass().getName());
     }
 
     /**
@@ -508,7 +528,8 @@ public class CommitLog implements CommitLogMBean
     synchronized public void resetConfiguration()
     {
         configuration = new Configuration(DatabaseDescriptor.getCommitLogCompression(),
-                                          DatabaseDescriptor.getEncryptionContext());
+                                          DatabaseDescriptor.getEncryptionContext(),
+                                          DatabaseDescriptor.getCommitLogWriteDiskAccessMode());
     }
 
     /**
@@ -597,6 +618,11 @@ public class CommitLog implements CommitLogMBean
     public static final class Configuration
     {
         /**
+         * Flag used to shows user configured Direct-IO status.
+         */
+        public final Config.DiskAccessMode diskAccessMode;
+
+        /**
          * The compressor class.
          */
         private final ParameterizedClass compressorClass;
@@ -609,17 +635,18 @@ public class CommitLog implements CommitLogMBean
         /**
          * The encryption context used to encrypt the segments.
          */
-        private EncryptionContext encryptionContext;
+        private final EncryptionContext encryptionContext;
 
-        public Configuration(ParameterizedClass compressorClass, EncryptionContext encryptionContext)
+        public Configuration(ParameterizedClass compressorClass, EncryptionContext encryptionContext,
+                             Config.DiskAccessMode diskAccessMode)
         {
             this.compressorClass = compressorClass;
             this.compressor = compressorClass != null ? CompressionParams.createCompressor(compressorClass) : null;
             this.encryptionContext = encryptionContext;
+            this.diskAccessMode = diskAccessMode;
         }
 
         /**
-         * Checks if the segments must be compressed.
          * @return <code>true</code> if the segments must be compressed, <code>false</code> otherwise.
          */
         public boolean useCompression()
@@ -628,7 +655,6 @@ public class CommitLog implements CommitLogMBean
         }
 
         /**
-         * Checks if the segments must be encrypted.
          * @return <code>true</code> if the segments must be encrypted, <code>false</code> otherwise.
          */
         public boolean useEncryption()
@@ -637,7 +663,6 @@ public class CommitLog implements CommitLogMBean
         }
 
         /**
-         * Returns the compressor used to compress the segments.
          * @return the compressor used to compress the segments
          */
         public ICompressor getCompressor()
@@ -646,7 +671,6 @@ public class CommitLog implements CommitLogMBean
         }
 
         /**
-         * Returns the compressor class.
          * @return the compressor class
          */
         public ParameterizedClass getCompressorClass()
@@ -655,7 +679,6 @@ public class CommitLog implements CommitLogMBean
         }
 
         /**
-         * Returns the compressor name.
          * @return the compressor name.
          */
         public String getCompressorName()
@@ -664,12 +687,27 @@ public class CommitLog implements CommitLogMBean
         }
 
         /**
-         * Returns the encryption context used to encrypt the segments.
          * @return the encryption context used to encrypt the segments
          */
         public EncryptionContext getEncryptionContext()
         {
             return encryptionContext;
+        }
+
+        /**
+         * @return Direct-IO used for CommitLog IO
+         */
+        public boolean isDirectIOEnabled()
+        {
+            return diskAccessMode == Config.DiskAccessMode.direct;
+        }
+
+        /**
+         * @return Standard or buffered I/O used for CommitLog IO
+         */
+        public boolean isStandardModeEnable()
+        {
+            return diskAccessMode == Config.DiskAccessMode.standard;
         }
     }
 }

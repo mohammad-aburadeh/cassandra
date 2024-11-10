@@ -19,6 +19,7 @@ package org.apache.cassandra.cql3.selection;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.List;
 
 import com.google.common.base.Objects;
 
@@ -41,7 +42,7 @@ final class FieldSelector extends Selector
         protected Selector deserialize(DataInputPlus in, int version, TableMetadata metadata) throws IOException
         {
             UserType type = (UserType) readType(metadata, in);
-            int field = (int) in.readUnsignedVInt();
+            int field = in.readUnsignedVInt32();
             Selector selected = Selector.serializer.deserialize(in, version, metadata);
 
             return new FieldSelector(type, field, selected);
@@ -98,9 +99,9 @@ final class FieldSelector extends Selector
         selected.addFetchedColumns(builder);
     }
 
-    public void addInput(ProtocolVersion protocolVersion, InputRow input)
+    public void addInput(InputRow input)
     {
-        selected.addInput(protocolVersion, input);
+        selected.addInput(input);
     }
 
     public ByteBuffer getOutput(ProtocolVersion protocolVersion)
@@ -108,8 +109,24 @@ final class FieldSelector extends Selector
         ByteBuffer value = selected.getOutput(protocolVersion);
         if (value == null)
             return null;
-        ByteBuffer[] buffers = type.split(value);
-        return field < buffers.length ? buffers[field] : null;
+        List<ByteBuffer> buffers = type.unpack(value);
+        return field < buffers.size() ? buffers.get(field) : null;
+    }
+
+    @Override
+    protected ColumnTimestamps getWritetimes(ProtocolVersion protocolVersion)
+    {
+        return getOutput(protocolVersion) == null
+               ? ColumnTimestamps.NO_TIMESTAMP
+               : selected.getWritetimes(protocolVersion).get(field);
+    }
+
+    @Override
+    protected ColumnTimestamps getTTLs(ProtocolVersion protocolVersion)
+    {
+        return getOutput(protocolVersion) == null
+               ? ColumnTimestamps.NO_TIMESTAMP
+               : selected.getTTLs(protocolVersion).get(field);
     }
 
     public AbstractType<?> getType()
@@ -174,7 +191,7 @@ final class FieldSelector extends Selector
     protected void serialize(DataOutputPlus out, int version) throws IOException
     {
         writeType(out, type);
-        out.writeUnsignedVInt(field);
+        out.writeUnsignedVInt32(field);
         serializer.serialize(selected, out, version);
     }
 }

@@ -31,7 +31,6 @@ import java.util.Set;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import org.apache.commons.lang3.StringUtils;
-import org.junit.After;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -41,25 +40,42 @@ import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.cql3.UntypedResultSet;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
 import org.apache.cassandra.dht.BootStrapper;
-import org.apache.cassandra.io.sstable.Component;
+import org.apache.cassandra.dht.Murmur3Partitioner;
+import org.apache.cassandra.index.sai.disk.format.IndexComponent;
+import org.apache.cassandra.index.sai.disk.format.IndexDescriptor;
+import org.apache.cassandra.index.sai.disk.io.IndexOutputWriter;
+import org.apache.cassandra.index.sai.disk.v1.SAICodecUtils;
+import org.apache.cassandra.index.sai.utils.IndexIdentifier;
+import org.apache.cassandra.io.sstable.Descriptor;
+import org.apache.cassandra.io.sstable.format.SSTableFormat.Components;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.io.sstable.format.big.BigFormat;
 import org.apache.cassandra.io.util.File;
+import org.apache.cassandra.io.util.PathUtils;
 import org.apache.cassandra.locator.InetAddressAndPort;
-import org.apache.cassandra.locator.TokenMetadata;
+import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.service.CacheService;
-import org.apache.cassandra.service.StorageService;
+import org.apache.cassandra.tcm.ClusterMetadata;
+import org.apache.cassandra.tcm.membership.NodeAddresses;
+import org.apache.cassandra.tcm.membership.NodeState;
+import org.apache.cassandra.tcm.transformations.Register;
+import org.apache.cassandra.tcm.transformations.UnsafeJoin;
 import org.apache.cassandra.utils.ByteBufferUtil;
-import org.apache.cassandra.utils.FBUtilities;
 
+import static org.apache.lucene.codecs.CodecUtil.FOOTER_MAGIC;
+import static org.apache.lucene.codecs.CodecUtil.writeBEInt;
+import static org.apache.lucene.codecs.CodecUtil.writeBELong;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 public class ImportTest extends CQLTester
 {
-    @After
-    public void afterTest()
+
+    @Override
+    public void afterTest() throws Throwable
     {
+        super.afterTest();
         SSTableReader.resetTidying();
     }
 
@@ -137,12 +153,12 @@ public class ImportTest extends CQLTester
         importer.importNewSSTables(options);
 
         assertEquals(20, execute("select * from %s").size());
-
     }
 
 
+    /** @deprecated See CASSANDRA-6719 */
     @Test
-    @Deprecated
+    @Deprecated(since = "4.0")
     public void refreshTest() throws Throwable
     {
         createTable("create table %s (id int primary key, d int)");
@@ -239,7 +255,7 @@ public class ImportTest extends CQLTester
             sstable.selfRef().release();
             for (File f : sstable.descriptor.directory.tryList())
             {
-                if (f.toString().contains(sstable.descriptor.baseFilename()))
+                if (f.toString().contains(sstable.descriptor.baseFile().toString()))
                 {
                     System.out.println("move " + f.toPath() + " to " + backupdir);
                     File moveFileTo = new File(backupdir, f.name());
@@ -248,6 +264,7 @@ public class ImportTest extends CQLTester
                 }
             }
         }
+        PathUtils.deleteRecursiveOnExit(temp);
         return new File(backupdir);
     }
 
@@ -278,8 +295,6 @@ public class ImportTest extends CQLTester
     @Test
     public void testGetCorrectDirectory() throws Throwable
     {
-        TokenMetadata metadata = StorageService.instance.getTokenMetadata();
-        metadata.updateNormalTokens(BootStrapper.getRandomTokens(metadata, 10), FBUtilities.getBroadcastAddressAndPort());
         createTable("create table %s (id int primary key, d int)");
         getCurrentColumnFamilyStore().disableAutoCompaction();
 
@@ -327,8 +342,8 @@ public class ImportTest extends CQLTester
 
         getCurrentColumnFamilyStore().clearUnsafe();
 
-        String filenameToCorrupt = sstableToCorrupt.descriptor.filenameFor(Component.STATS);
-        try (FileChannel fileChannel = new File(filenameToCorrupt).newReadWriteChannel())
+        File fileToCorrupt = sstableToCorrupt.descriptor.fileFor(Components.STATS);
+        try (FileChannel fileChannel = fileToCorrupt.newReadWriteChannel())
         {
             fileChannel.position(0);
             fileChannel.write(ByteBufferUtil.bytes(StringUtils.repeat('z', 2)));
@@ -420,38 +435,35 @@ public class ImportTest extends CQLTester
 
         getCurrentColumnFamilyStore().clearUnsafe();
 
-        TokenMetadata tmd = StorageService.instance.getTokenMetadata();
+        InetAddressAndPort ep1 = InetAddressAndPort.getByName("127.0.0.1");
+        InetAddressAndPort ep2 = InetAddressAndPort.getByName("127.0.0.2");
+        InetAddressAndPort ep3 = InetAddressAndPort.getByName("127.0.0.3");
 
-        tmd.updateNormalTokens(BootStrapper.getRandomTokens(tmd, 15), InetAddressAndPort.getByName("127.0.0.1"));
-        tmd.updateNormalTokens(BootStrapper.getRandomTokens(tmd, 15), InetAddressAndPort.getByName("127.0.0.2"));
-        tmd.updateNormalTokens(BootStrapper.getRandomTokens(tmd, 15), InetAddressAndPort.getByName("127.0.0.3"));
-
+        // ep1 is registered during fixture setup
+        assertEquals(NodeState.JOINED, ClusterMetadata.current().directory.peerState(ep1));
+        UnsafeJoin.unsafeJoin(Register.register(new NodeAddresses(ep2)),
+                              BootStrapper.getRandomTokens(ClusterMetadata.current(), 5));
+        UnsafeJoin.unsafeJoin(Register.register(new NodeAddresses(ep3)),
+                              BootStrapper.getRandomTokens(ClusterMetadata.current(), 5));
 
         File backupdir = moveToBackupDir(sstables);
-        try
-        {
-            SSTableImporter.Options options = SSTableImporter.Options.options(backupdir.toString()).verifySSTables(true).verifyTokens(true).build();
-            SSTableImporter importer = new SSTableImporter(getCurrentColumnFamilyStore());
-            List<String> failed = importer.importNewSSTables(options);
-            assertEquals(Collections.singletonList(backupdir.toString()), failed);
 
-            // verify that we check the tokens if verifySSTables == false but verifyTokens == true:
-            options = SSTableImporter.Options.options(backupdir.toString()).verifySSTables(false).verifyTokens(true).build();
-            importer = new SSTableImporter(getCurrentColumnFamilyStore());
-            failed = importer.importNewSSTables(options);
-            assertEquals(Collections.singletonList(backupdir.toString()), failed);
+        SSTableImporter.Options options = SSTableImporter.Options.options(backupdir.toString()).verifySSTables(true).verifyTokens(true).build();
+        SSTableImporter importer = new SSTableImporter(getCurrentColumnFamilyStore());
+        List<String> failed = importer.importNewSSTables(options);
+        assertEquals(Collections.singletonList(backupdir.toString()), failed);
 
-            // and that we can import with it disabled:
-            options = SSTableImporter.Options.options(backupdir.toString()).verifySSTables(true).verifyTokens(false).build();
-            importer = new SSTableImporter(getCurrentColumnFamilyStore());
-            failed = importer.importNewSSTables(options);
-            assertTrue(failed.isEmpty());
+        // verify that we check the tokens if verifySSTables == false but verifyTokens == true:
+        options = SSTableImporter.Options.options(backupdir.toString()).verifySSTables(false).verifyTokens(true).build();
+        importer = new SSTableImporter(getCurrentColumnFamilyStore());
+        failed = importer.importNewSSTables(options);
+        assertEquals(Collections.singletonList(backupdir.toString()), failed);
 
-        }
-        finally
-        {
-            tmd.clearUnsafe();
-        }
+        // and that we can import with it disabled:
+        options = SSTableImporter.Options.options(backupdir.toString()).verifySSTables(true).verifyTokens(false).build();
+        importer = new SSTableImporter(getCurrentColumnFamilyStore());
+        failed = importer.importNewSSTables(options);
+        assertTrue(failed.isEmpty());
     }
 
     @Test
@@ -464,29 +476,24 @@ public class ImportTest extends CQLTester
         Set<SSTableReader> sstables = getCurrentColumnFamilyStore().getLiveSSTables();
 
         getCurrentColumnFamilyStore().clearUnsafe();
+        InetAddressAndPort ep1 = InetAddressAndPort.getByName("127.0.0.1");
+        InetAddressAndPort ep2 = InetAddressAndPort.getByName("127.0.0.2");
+        InetAddressAndPort ep3 = InetAddressAndPort.getByName("127.0.0.3");
 
-        TokenMetadata tmd = StorageService.instance.getTokenMetadata();
-
-        tmd.updateNormalTokens(BootStrapper.getRandomTokens(tmd, 5), InetAddressAndPort.getByName("127.0.0.1"));
-        tmd.updateNormalTokens(BootStrapper.getRandomTokens(tmd, 5), InetAddressAndPort.getByName("127.0.0.2"));
-        tmd.updateNormalTokens(BootStrapper.getRandomTokens(tmd, 5), InetAddressAndPort.getByName("127.0.0.3"));
-
-
+        // ep1 is registered during fixture setup
+        assertEquals(NodeState.JOINED, ClusterMetadata.current().directory.peerState(ep1));
+        UnsafeJoin.unsafeJoin(Register.register(new NodeAddresses(ep2)),
+                              BootStrapper.getRandomTokens(ClusterMetadata.current(), 5));
+        UnsafeJoin.unsafeJoin(Register.register(new NodeAddresses(ep3)),
+                              BootStrapper.getRandomTokens(ClusterMetadata.current(), 5));
         File backupdir = moveToBackupDir(sstables);
-        try
-        {
-            SSTableImporter.Options options = SSTableImporter.Options.options(backupdir.toString())
-                                                                                     .verifySSTables(true)
-                                                                                     .verifyTokens(true)
-                                                                                     .extendedVerify(true).build();
-            SSTableImporter importer = new SSTableImporter(getCurrentColumnFamilyStore());
-            List<String> failedDirectories = importer.importNewSSTables(options);
-            assertEquals(Collections.singletonList(backupdir.toString()), failedDirectories);
-        }
-        finally
-        {
-            tmd.clearUnsafe();
-        }
+        SSTableImporter.Options options = SSTableImporter.Options.options(backupdir.toString())
+                                                                                 .verifySSTables(true)
+                                                                                 .verifyTokens(true)
+                                                                                 .extendedVerify(true).build();
+        SSTableImporter importer = new SSTableImporter(getCurrentColumnFamilyStore());
+        List<String> failedDirectories = importer.importNewSSTables(options);
+        assertEquals(Collections.singletonList(backupdir.toString()), failedDirectories);
     }
 
 
@@ -588,8 +595,8 @@ public class ImportTest extends CQLTester
         sstables.forEach(s -> s.selfRef().release());
         // corrupt the sstable which is still in the data directory
         SSTableReader sstableToCorrupt = sstables.iterator().next();
-        String filenameToCorrupt = sstableToCorrupt.descriptor.filenameFor(Component.STATS);
-        try (FileChannel fileChannel = new File(filenameToCorrupt).newReadWriteChannel())
+        File fileToCorrupt = sstableToCorrupt.descriptor.fileFor(Components.STATS);
+        try (FileChannel fileChannel = fileToCorrupt.newReadWriteChannel())
         {
             fileChannel.position(0);
             fileChannel.write(ByteBufferUtil.bytes(StringUtils.repeat('z', 2)));
@@ -629,7 +636,7 @@ public class ImportTest extends CQLTester
         assertEquals(20, rowCount);
         assertEquals(expectedFiles, getCurrentColumnFamilyStore().getLiveSSTables());
         for (SSTableReader sstable : expectedFiles)
-            assertTrue(new File(sstable.descriptor.filenameFor(Component.DATA)).exists());
+            assertTrue(sstable.descriptor.fileFor(Components.DATA).exists());
         getCurrentColumnFamilyStore().truncateBlocking();
         LifecycleTransaction.waitForDeletions();
         for (File f : sstableToCorrupt.descriptor.directory.tryList()) // clean up the corrupt files which truncate does not handle
@@ -762,11 +769,220 @@ public class ImportTest extends CQLTester
         }
     }
 
+    @Test
+    public void mustNotFailOnBuiltSAIIndexesWhenRequiredTest() throws Throwable
+    {
+        try
+        {
+            schemaChange(String.format("CREATE TABLE %s.%s (id int primary key, d int)", KEYSPACE, "sai_test"));
+            schemaChange(String.format("CREATE INDEX idx1 ON %s.%s (d) USING 'sai'", KEYSPACE, "sai_test"));
+
+            for (int i = 0; i < 10; i++)
+                execute(String.format("INSERT INTO %s.%s (id, d) values (?, ?)", KEYSPACE, "sai_test"), i, i);
+
+            ColumnFamilyStore cfs = getColumnFamilyStore(KEYSPACE, "sai_test");
+            Util.flush(cfs);
+
+            Set<SSTableReader> sstables = cfs.getLiveSSTables();
+            cfs.clearUnsafe();
+
+            File backupDir = moveToBackupDir(sstables);
+
+            assertEquals(0, execute(String.format("SELECT * FROM %s.%s", KEYSPACE, "sai_test")).size());
+
+            SSTableImporter importer = new SSTableImporter(cfs);
+            SSTableImporter.Options options = SSTableImporter.Options.options(backupDir.toString())
+                                                                     .copyData(true)
+                                                                     .failOnMissingIndex(true)
+                                                                     .build();
+            assertTrue(importer.importNewSSTables(options).isEmpty());
+            assertEquals(10, execute(String.format("SELECT * FROM %s.%s WHERE d >= 0", KEYSPACE, "sai_test")).size());
+        }
+        finally
+        {
+            execute(String.format("DROP TABLE IF EXISTS %s.%s", KEYSPACE, "sai_test"));
+        }
+    }
+
+    @Test
+    public void mustNotFailOnMissingSAIIndexWhenSAIDoesNotExistTest() throws Throwable
+    {
+        try
+        {
+            schemaChange(String.format("CREATE TABLE %s.%s (id int primary key, d int)", KEYSPACE, "sai_less_test"));
+
+            for (int i = 0; i < 10; i++)
+                execute(String.format("INSERT INTO %s.%s (id, d) values (?, ?)", KEYSPACE, "sai_less_test"), i, i);
+
+            ColumnFamilyStore cfs = getColumnFamilyStore(KEYSPACE, "sai_less_test");
+            Util.flush(cfs);
+
+            Set<SSTableReader> sstables = cfs.getLiveSSTables();
+            cfs.clearUnsafe();
+
+            File backupDir = moveToBackupDir(sstables);
+
+            assertEquals(0, execute(String.format("SELECT * FROM %s.%s", KEYSPACE, "sai_less_test")).size());
+
+            SSTableImporter importer = new SSTableImporter(cfs);
+            SSTableImporter.Options options = SSTableImporter.Options.options(backupDir.toString())
+                                                                     .copyData(true)
+                                                                     // this does not mean anything
+                                                                     // because our table does not have any SAI index
+                                                                     .failOnMissingIndex(true)
+                                                                     .build();
+            assertTrue(importer.importNewSSTables(options).isEmpty());
+            assertEquals(10, execute(String.format("SELECT * FROM %s.%s", KEYSPACE, "sai_less_test")).size());
+        }
+        finally
+        {
+            execute(String.format("DROP TABLE IF EXISTS %s.%s", KEYSPACE, "sai_less_test"));
+        }
+    }
+
+    @Test
+    public void mustFailOnMissingSAIWhenRequiredTest() throws Throwable
+    {
+        File backupDir = null;
+        try
+        {
+            schemaChange(String.format("CREATE TABLE %s.%s (id int primary key, d int)", KEYSPACE, "sai_test"));
+
+            for (int i = 0; i < 10; i++)
+                execute(String.format("INSERT INTO %s.%s (id, d) values (?, ?)", KEYSPACE, "sai_test"), i, i);
+
+            ColumnFamilyStore cfs = getColumnFamilyStore(KEYSPACE, "sai_test");
+            Util.flush(cfs);
+
+            Set<SSTableReader> sstables = cfs.getLiveSSTables();
+            cfs.clearUnsafe();
+
+            backupDir = moveToBackupDir(sstables);
+
+            assertEquals(0, execute(String.format("SELECT * FROM %s.%s", KEYSPACE, "sai_test")).size());
+
+            // create index and load sstables, they will be without indexes (because we created
+            // data when index was not created yet)
+            schemaChange(String.format("CREATE INDEX idx1 ON %s.%s (d) USING 'sai'", KEYSPACE, "sai_test"));
+
+            SSTableImporter importer = new SSTableImporter(cfs);
+            SSTableImporter.Options options = SSTableImporter.Options.options(backupDir.toString())
+                                                                     .copyData(true)
+                                                                     .failOnMissingIndex(true)
+                                                                     .build();
+            assertFalse(importer.importNewSSTables(options).isEmpty());
+            assertEquals(0, execute(String.format("SELECT * FROM %s.%s WHERE d >= 0", KEYSPACE, "sai_test")).size());
+        }
+        finally
+        {
+            if (backupDir != null)
+            {
+                backupDir.deleteRecursive();
+                backupDir.parent().deleteRecursive();
+            }
+
+            execute(String.format("DROP TABLE IF EXISTS %s.%s", KEYSPACE, "sai_test"));
+        }
+    }
+
+    @Test
+    public void skipIndexChecksumOnSAITest() throws Throwable
+    {
+        try
+        {
+            schemaChange(String.format("CREATE TABLE %s.%s (id int primary key, d int)", KEYSPACE, "sai_test"));
+            schemaChange(String.format("CREATE INDEX idx1 ON %s.%s (d) USING 'sai'", KEYSPACE, "sai_test"));
+
+            for (int i = 0; i < 10; i++)
+                execute(String.format("INSERT INTO %s.%s (id, d) values (?, ?)", KEYSPACE, "sai_test"), i, i);
+
+            ColumnFamilyStore cfs = getColumnFamilyStore(KEYSPACE, "sai_test");
+            Util.flush(cfs);
+
+            Set<SSTableReader> sstables = cfs.getLiveSSTables();
+            cfs.clearUnsafe();
+
+            File backupDir = moveToBackupDir(sstables);
+
+            File[] dataFiles = backupDir.list(f -> f.name().endsWith('-' + BigFormat.Components.DATA.type.repr));
+
+            IndexDescriptor indexDescriptor = IndexDescriptor.create(Descriptor.fromFile(dataFiles[0]),
+                                                                     Murmur3Partitioner.instance,
+                                                                     Schema.instance.getTableMetadata(KEYSPACE, "sai_test").comparator);
+            IndexIdentifier indexIdentifier = new IndexIdentifier(KEYSPACE, "sai_test", "idx1");
+
+            // corrupt one of index files
+            try (IndexOutputWriter output = indexDescriptor.openPerIndexOutput(IndexComponent.COLUMN_COMPLETION_MARKER, indexIdentifier))
+            {
+                SAICodecUtils.writeHeader(output);
+                output.writeByte((byte) 0);
+                // taken from SAICodecUtils#writeFooter
+                writeBEInt(output, FOOTER_MAGIC);
+                writeBEInt(output, 0);
+                writeBELong(output, 123); // some garbage checksum value to prove the point
+            }
+
+            assertEquals(0, execute(String.format("SELECT * FROM %s.%s", KEYSPACE, "sai_test")).size());
+
+            SSTableImporter importer = new SSTableImporter(cfs);
+            SSTableImporter.Options options = SSTableImporter.Options.options(backupDir.toString())
+                                                                     .copyData(true)
+                                                                     .failOnMissingIndex(true)
+                                                                     .validateIndexChecksum(false)
+                                                                     .build();
+
+            // even with corrupted column completion marker (wrong checksum), it will import
+            assertTrue(importer.importNewSSTables(options).isEmpty());
+            assertEquals(10, execute(String.format("SELECT * FROM %s.%s", KEYSPACE, "sai_test")).size());
+        }
+        finally
+        {
+            execute(String.format("DROP TABLE IF EXISTS %s.%s", KEYSPACE, "sai_test"));
+        }
+    }
+
+    @Test
+    public void skipEmptyIndexChecksumOnSAITest() throws Throwable
+    {
+        try
+        {
+            schemaChange(String.format("CREATE TABLE %s.%s (id int primary key, d int)", KEYSPACE, "sai_test"));
+            schemaChange(String.format("CREATE INDEX idx1 ON %s.%s (d) USING 'sai'", KEYSPACE, "sai_test"));
+
+            // no data in indexed column = empty index
+            for (int i = 0; i < 10; i++)
+                execute(String.format("INSERT INTO %s.%s (id) values (?)", KEYSPACE, "sai_test"), i);
+
+            ColumnFamilyStore cfs = getColumnFamilyStore(KEYSPACE, "sai_test");
+            Util.flush(cfs);
+
+            Set<SSTableReader> sstables = cfs.getLiveSSTables();
+            cfs.clearUnsafe();
+
+            File backupDir = moveToBackupDir(sstables);
+
+            assertEquals(0, execute(String.format("SELECT * FROM %s.%s", KEYSPACE, "sai_test")).size());
+
+            SSTableImporter importer = new SSTableImporter(cfs);
+            SSTableImporter.Options options = SSTableImporter.Options.options(backupDir.toString())
+                                                                     .copyData(true)
+                                                                     .failOnMissingIndex(true)
+                                                                     .validateIndexChecksum(true)
+                                                                     .build();
+            assertTrue(importer.importNewSSTables(options).isEmpty());
+            assertEquals(10, execute(String.format("SELECT * FROM %s.%s", KEYSPACE, "sai_test")).size());
+        }
+        finally
+        {
+            execute(String.format("DROP TABLE IF EXISTS %s.%s", KEYSPACE, "sai_test"));
+        }
+    }
+
     private static class MockCFS extends ColumnFamilyStore
     {
         public MockCFS(ColumnFamilyStore cfs, Directories dirs)
         {
-            super(cfs.keyspace, cfs.getTableName(), Util.newSeqGen(), cfs.metadata, dirs, false, false, true);
+            super(cfs.keyspace, cfs.getTableName(), Util.newSeqGen(), cfs.metadata.get(), dirs, false, false);
         }
     }
 }

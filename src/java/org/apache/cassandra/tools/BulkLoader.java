@@ -48,6 +48,7 @@ import org.apache.cassandra.utils.JVMStabilityInspector;
 import org.apache.cassandra.utils.NativeSSTableLoaderClient;
 import org.apache.cassandra.utils.OutputHandler;
 
+import static org.apache.cassandra.config.EncryptionOptions.ClientAuth.REQUIRED;
 import static org.apache.cassandra.utils.Clock.Global.nanoTime;
 
 public class BulkLoader
@@ -60,7 +61,7 @@ public class BulkLoader
 
     public static void load(LoaderOptions options) throws BulkLoadException
     {
-        DatabaseDescriptor.toolInitialization();
+        DatabaseDescriptor.clientInitialization();
         OutputHandler handler = new OutputHandler.SystemOutput(options.verbose, options.debug);
         SSTableLoader loader = new SSTableLoader(
                 options.directory.toAbsolute(),
@@ -72,7 +73,8 @@ public class BulkLoader
                         buildSSLOptions(options.clientEncOptions)),
                         handler,
                         options.connectionsPerHost,
-                        options.targetKeyspace);
+                        options.targetKeyspace,
+                        options.targetTable);
         DatabaseDescriptor.setStreamThroughputOutboundBytesPerSec(options.throttleBytes);
         DatabaseDescriptor.setInterDCStreamThroughputOutboundBytesPerSec(options.interDcThrottleBytes);
         DatabaseDescriptor.setEntireSSTableStreamThroughputOutboundMebibytesPerSec(options.entireSSTableThrottleMebibytes);
@@ -90,7 +92,6 @@ public class BulkLoader
             {
                 future = loader.stream(options.ignores, indicator);
             }
-
         }
         catch (Exception e)
         {
@@ -264,7 +265,7 @@ public class BulkLoader
         SSLContext sslContext;
         try
         {
-            sslContext = SSLFactory.createSSLContext(clientEncryptionOptions, true);
+            sslContext = SSLFactory.createSSLContext(clientEncryptionOptions, REQUIRED);
         }
         catch (IOException e)
         {

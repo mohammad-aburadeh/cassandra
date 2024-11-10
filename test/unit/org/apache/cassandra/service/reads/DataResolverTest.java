@@ -21,7 +21,7 @@ import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.util.Collections;
 import java.util.Iterator;
-import java.util.UUID;
+import java.util.function.BiFunction;
 
 import com.google.common.collect.Iterators;
 import com.google.common.collect.Sets;
@@ -58,18 +58,23 @@ import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.dht.Murmur3Partitioner;
 import org.apache.cassandra.dht.Token;
-import org.apache.cassandra.gms.Gossiper;
 import org.apache.cassandra.locator.EndpointsForRange;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.locator.Replica;
 import org.apache.cassandra.locator.ReplicaPlan;
+import org.apache.cassandra.locator.ReplicaPlans;
 import org.apache.cassandra.locator.ReplicaUtils;
+import org.apache.cassandra.tcm.ClusterMetadata;
+import org.apache.cassandra.tcm.Epoch;
 import org.apache.cassandra.net.*;
-import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.service.reads.repair.ReadRepair;
 import org.apache.cassandra.service.reads.repair.RepairedDataTracker;
 import org.apache.cassandra.service.reads.repair.RepairedDataVerifier;
 import org.apache.cassandra.service.reads.repair.TestableReadRepair;
+import org.apache.cassandra.tcm.membership.NodeAddresses;
+import org.apache.cassandra.tcm.membership.NodeId;
+import org.apache.cassandra.tcm.transformations.Register;
+import org.apache.cassandra.tcm.transformations.UnsafeJoin;
 import org.apache.cassandra.transport.Dispatcher;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
@@ -92,8 +97,6 @@ public class DataResolverTest extends AbstractReadResponseTest
 
     private EndpointsForRange makeReplicas(int num)
     {
-        StorageService.instance.getTokenMetadata().clearUnsafe();
-
         switch (num)
         {
             case 2:
@@ -118,8 +121,9 @@ public class DataResolverTest extends AbstractReadResponseTest
             {
                 InetAddressAndPort endpoint = InetAddressAndPort.getByAddress(new byte[]{ 127, 0, 0, (byte) (i + 1) });
                 replicas.add(ReplicaUtils.full(endpoint));
-                StorageService.instance.getTokenMetadata().updateNormalToken(token = token.increaseSlightly(), endpoint);
-                Gossiper.instance.initializeNodeUnsafe(endpoint, UUID.randomUUID(), 1);
+                NodeId node = Register.register(new NodeAddresses(endpoint));
+                UnsafeJoin.unsafeJoin(node, Sets.newHashSet(token = token.nextValidToken()));
+
             }
             catch (UnknownHostException e)
             {
@@ -395,7 +399,7 @@ public class DataResolverTest extends AbstractReadResponseTest
         assertEquals(1, readRepair.sent.size());
         Mutation mutation = readRepair.getForEndpoint(peer1);
         assertRepairMetadata(mutation);
-        assertRepairContainsDeletions(mutation, new DeletionTime(1, nowInSec));
+        assertRepairContainsDeletions(mutation, DeletionTime.build(1, nowInSec));
         assertRepairContainsNoColumns(mutation);
     }
 
@@ -435,19 +439,19 @@ public class DataResolverTest extends AbstractReadResponseTest
         assertEquals(4, readRepair.sent.size());
         Mutation mutation = readRepair.getForEndpoint(peer1);
         assertRepairMetadata(mutation);
-        assertRepairContainsDeletions(mutation, new DeletionTime(2, nowInSec));
+        assertRepairContainsDeletions(mutation, DeletionTime.build(2, nowInSec));
         assertRepairContainsColumn(mutation, "1", "two", "B", 3);
 
         // peer 2 needs the deletion from peer 4 and the row from peer 3
         mutation = readRepair.getForEndpoint(peer2);
         assertRepairMetadata(mutation);
-        assertRepairContainsDeletions(mutation, new DeletionTime(2, nowInSec));
+        assertRepairContainsDeletions(mutation, DeletionTime.build(2, nowInSec));
         assertRepairContainsColumn(mutation, "1", "two", "B", 3);
 
         // peer 3 needs just the deletion from peer 4
         mutation = readRepair.getForEndpoint(peer3);
         assertRepairMetadata(mutation);
-        assertRepairContainsDeletions(mutation, new DeletionTime(2, nowInSec));
+        assertRepairContainsDeletions(mutation, DeletionTime.build(2, nowInSec));
         assertRepairContainsNoColumns(mutation);
 
         // peer 4 needs just the row from peer 3
@@ -547,11 +551,12 @@ public class DataResolverTest extends AbstractReadResponseTest
     @Test
     public void testRepairRangeTombstoneBoundary() throws UnknownHostException
     {
-        testRepairRangeTombstoneBoundary(1, 0, 1);
+        EndpointsForRange replicas = makeReplicas(2);
+        testRepairRangeTombstoneBoundary(replicas, 1, 0, 1);
         readRepair.sent.clear();
-        testRepairRangeTombstoneBoundary(1, 1, 0);
+        testRepairRangeTombstoneBoundary(replicas, 1, 1, 0);
         readRepair.sent.clear();
-        testRepairRangeTombstoneBoundary(1, 1, 1);
+        testRepairRangeTombstoneBoundary(replicas, 1, 1, 1);
     }
 
     /**
@@ -559,9 +564,8 @@ public class DataResolverTest extends AbstractReadResponseTest
      * same deletion on both side (while is useless but could be created by legacy code pre-CASSANDRA-13237 and could
      * thus still be sent).
      */
-    private void testRepairRangeTombstoneBoundary(int timestamp1, int timestamp2, int timestamp3) throws UnknownHostException
+    private void testRepairRangeTombstoneBoundary(EndpointsForRange replicas, int timestamp1, int timestamp2, int timestamp3) throws UnknownHostException
     {
-        EndpointsForRange replicas = makeReplicas(2);
         DataResolver resolver = new DataResolver(command, plan(replicas, ALL), readRepair, Dispatcher.RequestTime.forImmediateExecution());
         InetAddressAndPort peer1 = replicas.get(0).endpoint();
         InetAddressAndPort peer2 = replicas.get(1).endpoint();
@@ -644,7 +648,7 @@ public class DataResolverTest extends AbstractReadResponseTest
         assertRepairMetadata(mutation);
         assertRepairContainsNoColumns(mutation);
 
-        assertRepairContainsDeletions(mutation, new DeletionTime(10, nowInSec));
+        assertRepairContainsDeletions(mutation, DeletionTime.build(10, nowInSec));
     }
 
     /**
@@ -663,7 +667,7 @@ public class DataResolverTest extends AbstractReadResponseTest
         PartitionUpdate upd1 = new RowUpdateBuilder(cfm, nowInSec, 1L, dk)
                                .addRangeTombstone(rt1)
                                .buildUpdate();
-        ((MutableDeletionInfo)upd1.deletionInfo()).add(new DeletionTime(10, nowInSec));
+        ((MutableDeletionInfo)upd1.deletionInfo()).add(DeletionTime.build(10, nowInSec));
         UnfilteredPartitionIterator iter1 = iter(upd1);
 
         // 2nd "stream": a range tombstone that is covered by the other stream rt
@@ -691,7 +695,7 @@ public class DataResolverTest extends AbstractReadResponseTest
         assertRepairContainsNoColumns(mutation);
 
         // 2nd stream should get both the partition deletion, as well as the part of the 1st stream RT that it misses
-        assertRepairContainsDeletions(mutation, new DeletionTime(10, nowInSec),
+        assertRepairContainsDeletions(mutation, DeletionTime.build(10, nowInSec),
                                       tombstone("0", true, "2", false, 11, nowInSec),
                                       tombstone("3", false, "9", true, 11, nowInSec));
     }
@@ -744,14 +748,14 @@ public class DataResolverTest extends AbstractReadResponseTest
 
         Row.Builder builder = BTreeRow.unsortedBuilder();
         builder.newRow(Clustering.EMPTY);
-        builder.addComplexDeletion(m, new DeletionTime(ts[0] - 1, nowInSec));
+        builder.addComplexDeletion(m, DeletionTime.build(ts[0] - 1, nowInSec));
         builder.addCell(mapCell(0, 0, ts[0]));
 
         InetAddressAndPort peer1 = replicas.get(0).endpoint();
         resolver.preprocess(response(cmd, peer1, iter(PartitionUpdate.singleRowUpdate(cfm2, dk, builder.build()))));
 
         builder.newRow(Clustering.EMPTY);
-        DeletionTime expectedCmplxDelete = new DeletionTime(ts[1] - 1, nowInSec);
+        DeletionTime expectedCmplxDelete = DeletionTime.build(ts[1] - 1, nowInSec);
         builder.addComplexDeletion(m, expectedCmplxDelete);
         Cell<?> expectedCell = mapCell(1, 1, ts[1]);
         builder.addCell(expectedCell);
@@ -796,14 +800,14 @@ public class DataResolverTest extends AbstractReadResponseTest
 
         Row.Builder builder = BTreeRow.unsortedBuilder();
         builder.newRow(Clustering.EMPTY);
-        builder.addComplexDeletion(m, new DeletionTime(ts[0] - 1, nowInSec));
+        builder.addComplexDeletion(m, DeletionTime.build(ts[0] - 1, nowInSec));
         builder.addCell(mapCell(0, 0, ts[0]));
 
         InetAddressAndPort peer1 = replicas.get(0).endpoint();
         resolver.preprocess(response(cmd, peer1, iter(PartitionUpdate.singleRowUpdate(cfm2, dk, builder.build()))));
 
         builder.newRow(Clustering.EMPTY);
-        DeletionTime expectedCmplxDelete = new DeletionTime(ts[1] - 1, nowInSec);
+        DeletionTime expectedCmplxDelete = DeletionTime.build(ts[1] - 1, nowInSec);
         builder.addComplexDeletion(m, expectedCmplxDelete);
 
         InetAddressAndPort peer2 = replicas.get(1).endpoint();
@@ -841,7 +845,7 @@ public class DataResolverTest extends AbstractReadResponseTest
         // map column
         Row.Builder builder = BTreeRow.unsortedBuilder();
         builder.newRow(Clustering.EMPTY);
-        DeletionTime expectedCmplxDelete = new DeletionTime(ts[0] - 1, nowInSec);
+        DeletionTime expectedCmplxDelete = DeletionTime.build(ts[0] - 1, nowInSec);
         builder.addComplexDeletion(m, expectedCmplxDelete);
         Cell<?> expectedCell = mapCell(0, 0, ts[0]);
         builder.addCell(expectedCell);
@@ -891,14 +895,14 @@ public class DataResolverTest extends AbstractReadResponseTest
         // cleared map column
         Row.Builder builder = BTreeRow.unsortedBuilder();
         builder.newRow(Clustering.EMPTY);
-        builder.addComplexDeletion(m, new DeletionTime(ts[0] - 1, nowInSec));
+        builder.addComplexDeletion(m, DeletionTime.build(ts[0] - 1, nowInSec));
 
         InetAddressAndPort peer1 = replicas.get(0).endpoint();
         resolver.preprocess(response(cmd, peer1, iter(PartitionUpdate.singleRowUpdate(cfm2, dk, builder.build()))));
 
         // newer, overwritten map column
         builder.newRow(Clustering.EMPTY);
-        DeletionTime expectedCmplxDelete = new DeletionTime(ts[1] - 1, nowInSec);
+        DeletionTime expectedCmplxDelete = DeletionTime.build(ts[1] - 1, nowInSec);
         builder.addComplexDeletion(m, expectedCmplxDelete);
         Cell<?> expectedCell = mapCell(1, 1, ts[1]);
         builder.addCell(expectedCell);
@@ -1322,7 +1326,15 @@ public class DataResolverTest extends AbstractReadResponseTest
 
     private ReplicaPlan.SharedForRangeRead plan(EndpointsForRange replicas, ConsistencyLevel consistencyLevel)
     {
-        return ReplicaPlan.shared(new ReplicaPlan.ForRangeRead(ks, ks.getReplicationStrategy(), consistencyLevel, ReplicaUtils.FULL_BOUNDS, replicas, replicas, 1));
+        BiFunction<ReplicaPlan<?, ?>, Token, ReplicaPlan.ForWrite> repairPlan = (self, t) -> ReplicaPlans.forReadRepair(self, ClusterMetadata.current(), ks, consistencyLevel, t, (i) -> true);
+        return ReplicaPlan.shared(new ReplicaPlan.ForRangeRead(ks,
+                                                               ks.getReplicationStrategy(),
+                                                               consistencyLevel,
+                                                               ReplicaUtils.FULL_BOUNDS,
+                                                               replicas, replicas,
+                                                               1, null,
+                                                               repairPlan,
+                                                               Epoch.EMPTY));
     }
 
     private static void resolveAndConsume(DataResolver resolver)

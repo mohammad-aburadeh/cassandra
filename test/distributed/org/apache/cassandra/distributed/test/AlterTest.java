@@ -23,11 +23,10 @@ import java.util.List;
 import com.google.common.collect.ImmutableMap;
 import org.junit.Assert;
 import org.junit.Test;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.cql3.Lists;
+import org.apache.cassandra.cql3.terms.Lists;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.distributed.Cluster;
 import org.apache.cassandra.distributed.api.Feature;
@@ -38,10 +37,9 @@ import org.apache.cassandra.distributed.api.IIsolatedExecutor;
 import org.apache.cassandra.distributed.api.SimpleQueryResult;
 import org.apache.cassandra.distributed.api.TokenSupplier;
 import org.apache.cassandra.distributed.shared.ClusterUtils;
-import org.apache.cassandra.distributed.util.QueryResultUtil;
-import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.Throwables;
 
+import static org.apache.cassandra.config.CassandraRelevantProperties.JOIN_RING;
 import static org.apache.cassandra.distributed.action.GossipHelper.withProperty;
 import static org.apache.cassandra.distributed.api.ConsistencyLevel.ONE;
 import static org.apache.cassandra.distributed.api.Feature.GOSSIP;
@@ -99,17 +97,7 @@ public class AlterTest extends TestBaseImpl
         {
             IInstanceConfig config = cluster.newInstanceConfig();
             IInvokableInstance gossippingOnlyMember = cluster.bootstrap(config);
-            withProperty("cassandra.join_ring", Boolean.toString(false), () -> gossippingOnlyMember.startup(cluster));
-
-            int attempts = 0;
-            // it takes some time the underlying structure is populated otherwise the test is flaky
-            while (((IInvokableInstance) (cluster.get(2))).callOnInstance(() -> StorageService.instance.getTokenMetadata().getAllMembers().isEmpty()))
-            {
-                if (attempts++ > 30)
-                    throw new RuntimeException("timeouted on waiting for a member");
-                Thread.sleep(1000);
-            }
-
+            withProperty(JOIN_RING, false, () -> gossippingOnlyMember.startup(cluster));
             for (String operation : new String[] { "CREATE", "ALTER" })
             {
                 SimpleQueryResult result = cluster.coordinator(2)
@@ -158,12 +146,8 @@ public class AlterTest extends TestBaseImpl
             cluster.schemaChange("ALTER TABLE " + KEYSPACE + ".tbl WITH memtable = 'testconfig'", false, node1);
             // the above should succeed, the configuration is acceptable to node1
 
-            final String schema1 = QueryResultUtil.expand(node1.executeInternalWithResult("SELECT * FROM system_schema.tables WHERE keyspace_name=?", KEYSPACE));
-            final String schema2 = QueryResultUtil.expand(node2.executeInternalWithResult("SELECT * FROM system_schema.tables WHERE keyspace_name=?", KEYSPACE));
-            logger.info("node1 schema: \n{}", schema1);
-            logger.info("node2 schema: \n{}", schema2);
-            Assert.assertEquals(schema1, schema2);
-            List<String> errorInLog = node2.logs().grep(mark, "ERROR.*Invalid memtable configuration.*").getResult();
+            ClusterUtils.awaitGossipSchemaMatch(cluster);
+            List<String> errorInLog = node2.logs().grep(mark,"ERROR.*Invalid memtable configuration.*").getResult();
             Assert.assertTrue(errorInLog.size() > 0);
             logger.info(Lists.listToString(errorInLog));
 
@@ -175,9 +159,7 @@ public class AlterTest extends TestBaseImpl
                                                                     "testconfig", ImmutableMap.of(
                                                                         "class_name", "NotExistingMemtable")))));
             node3.startup(cluster);
-            final String schema3 = QueryResultUtil.expand(node3.executeInternalWithResult("SELECT * FROM system_schema.tables WHERE keyspace_name=?", KEYSPACE));
-            logger.info("node3 schema: \n{}", schema3);
-            Assert.assertEquals(schema1, schema3);
+            ClusterUtils.awaitGossipSchemaMatch(cluster);
 
             errorInLog = node3.logs().grep("ERROR.*Invalid memtable configuration.*").getResult();
             Assert.assertTrue(errorInLog.size() > 0);

@@ -27,8 +27,10 @@ public interface GossiperMBean
 
     public int getCurrentGenerationNumber(String address) throws UnknownHostException;
 
+    @Deprecated(since = "CEP-21")
     public void unsafeAssassinateEndpoint(String address) throws UnknownHostException;
 
+    @Deprecated(since = "CEP-21")
     public void assassinateEndpoint(String address) throws UnknownHostException;
 
     public List<String> reloadSeeds();
@@ -38,9 +40,7 @@ public interface GossiperMBean
     /** Returns each node's database release version */
     public Map<String, List<String>> getReleaseVersionsWithPort();
 
-    /** Returns a map of endpoints that don't have matching tokenMetadata to gossip tokens.
-     * Values are lists of fixed size two (as Pair is not jmx safe),
-     * the first is the gossip tokens, the second tokenMetadata).
-     */
-    public Map<String, List<String>> compareGossipAndTokenMetadata();
+    public boolean getLooseEmptyEnabled();
+
+    public void setLooseEmptyEnabled(boolean enabled);
 }

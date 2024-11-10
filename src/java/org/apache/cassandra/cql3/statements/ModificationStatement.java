@@ -27,12 +27,12 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.auth.Permission;
 import org.apache.cassandra.db.guardrails.Guardrails;
-import org.apache.cassandra.db.marshal.ValueAccessor;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.locator.Replica;
 import org.apache.cassandra.locator.ReplicaLayout;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.Schema;
+import org.apache.cassandra.schema.SchemaConstants;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.schema.ViewMetadata;
 import org.apache.cassandra.cql3.*;
@@ -51,6 +51,7 @@ import org.apache.cassandra.db.partitions.*;
 import org.apache.cassandra.db.rows.RowIterator;
 import org.apache.cassandra.db.view.View;
 import org.apache.cassandra.exceptions.*;
+import org.apache.cassandra.metrics.ClientRequestSizeMetrics;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.service.StorageProxy;
@@ -63,7 +64,6 @@ import org.apache.cassandra.transport.messages.ResultMessage;
 import org.apache.cassandra.triggers.TriggerExecutor;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.MD5Digest;
-import org.apache.cassandra.utils.Pair;
 
 import static org.apache.cassandra.cql3.statements.RequestValidations.checkFalse;
 import static org.apache.cassandra.cql3.statements.RequestValidations.checkNull;
@@ -175,6 +175,12 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
         List<Function> functions = new ArrayList<>();
         addFunctionsTo(functions);
         return functions;
+    }
+
+    @Override
+    public boolean eligibleAsPreparedStatement()
+    {
+        return true;
     }
 
     public void addFunctionsTo(List<Function> functions)
@@ -300,6 +306,16 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
         }
     }
 
+    public void validateTimestamp(QueryState queryState, QueryOptions options)
+    {
+        if (!isTimestampSet())
+            return;
+
+        long ts = attrs.getTimestamp(options.getTimestamp(queryState), options);
+        Guardrails.maximumAllowableTimestamp.guard(ts, table(), false, queryState.getClientState());
+        Guardrails.minimumAllowableTimestamp.guard(ts, table(), false, queryState.getClientState());
+    }
+
     public RegularAndStaticColumns updatedColumns()
     {
         return updatedColumns;
@@ -410,7 +426,7 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
                                                            DataLimits limits,
                                                            boolean local,
                                                            ConsistencyLevel cl,
-                                                           int nowInSeconds,
+                                                           long nowInSeconds,
                                                            Dispatcher.RequestTime requestTime)
     {
         if (!requiresRead())
@@ -430,7 +446,7 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
             commands.add(SinglePartitionReadCommand.create(metadata(),
                                                            nowInSeconds,
                                                            ColumnFilter.selection(this.requiresRead),
-                                                           RowFilter.NONE,
+                                                           RowFilter.none(),
                                                            limits,
                                                            metadata().partitioner.decorateKey(key),
                                                            filter));
@@ -504,6 +520,7 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
             cl.validateForWrite();
 
         validateDiskUsage(options, queryState.getClientState());
+        validateTimestamp(queryState, options);
 
         List<? extends IMutation> mutations =
             getMutations(queryState.getClientState(),
@@ -513,7 +530,12 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
                          options.getNowInSeconds(queryState),
                          requestTime);
         if (!mutations.isEmpty())
+        {
             StorageProxy.mutateWithTriggers(mutations, cl, false, requestTime);
+
+            if (!SchemaConstants.isSystemKeyspace(metadata.keyspace))
+                ClientRequestSizeMetrics.recordRowAndColumnCountMetrics(mutations);
+        }
 
         return null;
     }
@@ -547,7 +569,7 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
 
         DecoratedKey key = metadata().partitioner.decorateKey(keys.get(0));
         long timestamp = options.getTimestamp(queryState);
-        int nowInSeconds = options.getNowInSeconds(queryState);
+        long nowInSeconds = options.getNowInSeconds(queryState);
 
         checkFalse(restrictions.clusteringKeyRestrictionsHasIN(),
                    "IN on the clustering key columns is not supported with conditional %s",
@@ -629,7 +651,7 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
                                                       Iterable<ColumnMetadata> columnsWithConditions,
                                                       boolean isBatch,
                                                       QueryOptions options,
-                                                      int nowInSeconds)
+                                                      long nowInSeconds)
     {
         TableMetadata metadata = partition.metadata();
         Selection selection;
@@ -652,7 +674,7 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
         }
 
         Selectors selectors = selection.newSelectors(options);
-        ResultSetBuilder builder = new ResultSetBuilder(selection.getResultMetadata(), selectors);
+        ResultSetBuilder builder = new ResultSetBuilder(selection.getResultMetadata(), selectors, false);
         SelectStatement.forSelection(metadata, selection)
                        .processPartition(partition, options, builder, nowInSeconds);
 
@@ -670,7 +692,7 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
     throws RequestValidationException, RequestExecutionException
     {
         long timestamp = options.getTimestamp(queryState);
-        int nowInSeconds = options.getNowInSeconds(queryState);
+        long nowInSeconds = options.getNowInSeconds(queryState);
         for (IMutation mutation : getMutations(queryState.getClientState(), options, true, timestamp, nowInSeconds, requestTime))
             mutation.apply();
         return null;
@@ -686,7 +708,7 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
         }
     }
 
-    static RowIterator casInternal(ClientState state, CQL3CasRequest request, long timestamp, int nowInSeconds)
+    static RowIterator casInternal(ClientState state, CQL3CasRequest request, long timestamp, long nowInSeconds)
     {
         Ballot ballot = BallotGenerator.Global.atUnixMicros(timestamp, NONE);
 
@@ -723,14 +745,14 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
                                                    QueryOptions options,
                                                    boolean local,
                                                    long timestamp,
-                                                   int nowInSeconds,
+                                                   long nowInSeconds,
                                                    Dispatcher.RequestTime requestTime)
     {
         List<ByteBuffer> keys = buildPartitionKeyNames(options, state);
         HashMultiset<ByteBuffer> perPartitionKeyCounts = HashMultiset.create(keys);
         SingleTableUpdatesCollector collector = new SingleTableUpdatesCollector(metadata, updatedColumns, perPartitionKeyCounts);
         addUpdates(collector, keys, state, options, local, timestamp, nowInSeconds, requestTime);
-        return collector.toMutations();
+        return collector.toMutations(state);
     }
 
     final void addUpdates(UpdatesCollector collector,
@@ -739,7 +761,7 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
                           QueryOptions options,
                           boolean local,
                           long timestamp,
-                          int nowInSeconds,
+                          long nowInSeconds,
                           Dispatcher.RequestTime requestTime)
     {
         if (hasSlices())
@@ -795,7 +817,7 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
                 {
                     for (Clustering<?> clustering : clusterings)
                     {
-                        validateClustering(clustering);
+                        clustering.validate();
                         addUpdateForKey(updateBuilder, clustering, params);
                     }
                 }
@@ -803,24 +825,9 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
         }
     }
 
-    private <V> void validateClustering(Clustering<V> clustering)
-    {
-        ValueAccessor<V> accessor = clustering.accessor();
-        for (V v : clustering.getRawValues())
-        {
-            if (v != null && accessor.size(v) > FBUtilities.MAX_UNSIGNED_SHORT)
-                throw new InvalidRequestException(String.format("Key length of %d is longer than maximum of %d",
-                                                                clustering.dataSize(),
-                                                                FBUtilities.MAX_UNSIGNED_SHORT));
-        }
-    }
-
     public Slices createSlices(QueryOptions options)
     {
-        SortedSet<ClusteringBound<?>> startBounds = restrictions.getClusteringColumnsBounds(Bound.START, options);
-        SortedSet<ClusteringBound<?>> endBounds = restrictions.getClusteringColumnsBounds(Bound.END, options);
-
-        return toSlices(startBounds, endBounds);
+        return restrictions.getSlices(options);
     }
 
     private UpdateParameters makeUpdateParameters(Collection<ByteBuffer> keys,
@@ -829,7 +836,7 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
                                                   QueryOptions options,
                                                   boolean local,
                                                   long timestamp,
-                                                  int nowInSeconds,
+                                                  long nowInSeconds,
                                                   Dispatcher.RequestTime requestTime)
     {
         if (clusterings.contains(Clustering.STATIC_CLUSTERING))
@@ -861,7 +868,7 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
                                                   DataLimits limits,
                                                   boolean local,
                                                   long timestamp,
-                                                  int nowInSeconds,
+                                                  long nowInSeconds,
                                                   Dispatcher.RequestTime requestTime)
     {
         // Some lists operation requires reading
@@ -884,49 +891,18 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
                                     lists);
     }
 
-    private Slices toSlices(SortedSet<ClusteringBound<?>> startBounds, SortedSet<ClusteringBound<?>> endBounds)
-    {
-        return toSlices(metadata, startBounds, endBounds);
-    }
-
-    public static Slices toSlices(TableMetadata metadata, SortedSet<ClusteringBound<?>> startBounds, SortedSet<ClusteringBound<?>> endBounds)
-    {
-        return toSlices(metadata.comparator, startBounds, endBounds);
-    }
-
-    public static Slices toSlices(ClusteringComparator comparator, SortedSet<ClusteringBound<?>> startBounds, SortedSet<ClusteringBound<?>> endBounds)
-    {
-        assert startBounds.size() == endBounds.size();
-
-        Slices.Builder builder = new Slices.Builder(comparator);
-
-        Iterator<ClusteringBound<?>> starts = startBounds.iterator();
-        Iterator<ClusteringBound<?>> ends = endBounds.iterator();
-
-        while (starts.hasNext())
-        {
-            Slice slice = Slice.make(starts.next(), ends.next());
-            if (!slice.isEmpty(comparator))
-            {
-                builder.add(slice);
-            }
-        }
-
-        return builder.build();
-    }
-
     public static abstract class Parsed extends QualifiedStatement
     {
         protected final StatementType type;
         private final Attributes.Raw attrs;
-        private final List<Pair<ColumnIdentifier, ColumnCondition.Raw>> conditions;
+        private final List<ColumnCondition.Raw> conditions;
         private final boolean ifNotExists;
         private final boolean ifExists;
 
         protected Parsed(QualifiedName name,
                          StatementType type,
                          Attributes.Raw attrs,
-                         List<Pair<ColumnIdentifier, ColumnCondition.Raw>> conditions,
+                         List<ColumnCondition.Raw> conditions,
                          boolean ifNotExists,
                          boolean ifExists)
         {
@@ -940,10 +916,10 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
 
         public ModificationStatement prepare(ClientState state)
         {
-            return prepare(bindVariables);
+            return prepare(state, bindVariables);
         }
 
-        public ModificationStatement prepare(VariableSpecifications bindVariables)
+        public ModificationStatement prepare(ClientState state, VariableSpecifications bindVariables)
         {
             TableMetadata metadata = Schema.instance.validateTable(keyspace(), name());
 
@@ -952,7 +928,7 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
 
             Conditions preparedConditions = prepareConditions(metadata, bindVariables);
 
-            return prepareInternal(metadata, bindVariables, preparedConditions, preparedAttributes);
+            return prepareInternal(state, metadata, bindVariables, preparedConditions, preparedAttributes);
         }
 
         /**
@@ -999,19 +975,18 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
 
             ColumnConditions.Builder builder = ColumnConditions.newBuilder();
 
-            for (Pair<ColumnIdentifier, ColumnCondition.Raw> entry : conditions)
+            for (ColumnCondition.Raw rawCondition : conditions)
             {
-                ColumnMetadata def = metadata.getExistingColumn(entry.left);
-                ColumnCondition condition = entry.right.prepare(keyspace(), def, metadata);
+                ColumnCondition condition = rawCondition.prepare(metadata);
                 condition.collectMarkerSpecification(bindVariables);
 
-                checkFalse(def.isPrimaryKeyColumn(), "PRIMARY KEY column '%s' cannot have IF conditions", def.name);
                 builder.add(condition);
             }
             return builder.build();
         }
 
-        protected abstract ModificationStatement prepareInternal(TableMetadata metadata,
+        protected abstract ModificationStatement prepareInternal(ClientState state,
+                                                                 TableMetadata metadata,
                                                                  VariableSpecifications bindVariables,
                                                                  Conditions conditions,
                                                                  Attributes attrs);
@@ -1019,27 +994,29 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
         /**
          * Creates the restrictions.
          *
-         * @param metadata the column family meta data
+         * @param metadata the table meta data
          * @param boundNames the bound names
          * @param operations the column operations
          * @param where the where clause
          * @param conditions the conditions
          * @return the restrictions
          */
-        protected StatementRestrictions newRestrictions(TableMetadata metadata,
+        protected StatementRestrictions newRestrictions(ClientState state,
+                                                        TableMetadata metadata,
                                                         VariableSpecifications boundNames,
                                                         Operations operations,
                                                         WhereClause where,
-                                                        Conditions conditions)
+                                                        Conditions conditions,
+                                                        List<Ordering> orderings)
         {
             if (where.containsCustomExpressions())
                 throw new InvalidRequestException(CUSTOM_EXPRESSIONS_NOT_ALLOWED);
 
             boolean applyOnlyToStaticColumns = appliesOnlyToStaticColumns(operations, conditions);
-            return new StatementRestrictions(type, metadata, where, boundNames, applyOnlyToStaticColumns, false, false);
+            return new StatementRestrictions(state, type, metadata, where, boundNames, orderings, applyOnlyToStaticColumns, false, false);
         }
 
-        public List<Pair<ColumnIdentifier, ColumnCondition.Raw>> getConditions()
+        public List<ColumnCondition.Raw> getConditions()
         {
             return conditions;
         }

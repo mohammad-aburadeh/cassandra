@@ -31,12 +31,13 @@ public class StatsTable
     public boolean isLeveledSstable = false;
     public Object sstableCount;
     public Object oldSSTableCount;
+    public Long maxSSTableSize;
     public String spaceUsedLive;
     public String spaceUsedTotal;
     public String spaceUsedBySnapshotsTotal;
     public boolean offHeapUsed = false;
     public String offHeapMemoryUsedTotal;
-    public Object sstableCompressionRatio;
+    public double sstableCompressionRatio;
     public Object numberOfPartitionsEstimate;
     public Object memtableCellCount;
     public String memtableDataSize;
@@ -50,7 +51,7 @@ public class StatsTable
     public double localWriteLatencyMs;
     public Object pendingFlushes;
     public Object bloomFilterFalsePositives;
-    public Object bloomFilterFalseRatio;
+    public double bloomFilterFalseRatio;
     public String bloomFilterSpaceUsed;
     public boolean bloomFilterOffHeapUsed = false;
     public String bloomFilterOffHeapMemoryUsed;
@@ -69,13 +70,16 @@ public class StatsTable
     public long maximumLiveCellsPerSliceLastFiveMinutes;
     public double averageTombstonesPerSliceLastFiveMinutes;
     public long maximumTombstonesPerSliceLastFiveMinutes;
-    public String droppedMutations;
     public List<String> sstablesInEachLevel = new ArrayList<>();
     public List<String> sstableBytesInEachLevel = new ArrayList<>();
+    public int[] sstableCountPerTWCSBucket = null;
     public Boolean isInCorrectLocation = null; // null: option not active
     public double droppableTombstoneRatio;
     public Map<String, String> topSizePartitions;
     public Map<String, Long> topTombstonePartitions;
     public String topSizePartitionsLastUpdate;
     public String topTombstonePartitionsLastUpdate;
+    public double localReadWriteRatio;
+    public Long twcsDurationInMillis;
+    public String twcs;
 }

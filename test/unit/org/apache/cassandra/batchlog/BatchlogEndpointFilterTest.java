@@ -35,9 +35,12 @@ import com.google.common.collect.ImmutableMultimap;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Multimap;
 import com.google.common.collect.Multimaps;
-import org.junit.Test;
+
+import org.junit.After;
 import org.junit.Assert;
+import org.junit.Before;
 import org.junit.BeforeClass;
+import org.junit.Test;
 
 import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
@@ -47,19 +50,44 @@ import org.apache.cassandra.locator.IEndpointSnitch;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.locator.ReplicaPlans;
 import org.apache.cassandra.service.StorageService;
+import org.apache.cassandra.tcm.ClusterMetadataService;
+import org.apache.cassandra.tcm.StubClusterMetadataService;
 import org.apache.cassandra.utils.FBUtilities;
 
-
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.CoreMatchers.*;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThat;
-import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.Assert.assertTrue;
+
 
 public class BatchlogEndpointFilterTest
 {
     private static final String LOCAL = "local";
+    private double oldBadness;
+
+    @BeforeClass
+    public static void initialiseServer()
+    {
+        DatabaseDescriptor.daemonInitialization();
+    }
+
+    @Before
+    public void before()
+    {
+        oldBadness = DatabaseDescriptor.getDynamicBadnessThreshold();
+        DatabaseDescriptor.setDynamicBadnessThreshold(0.1);
+        ClusterMetadataService.unsetInstance();
+        ClusterMetadataService.setInstance(StubClusterMetadataService.forTesting());
+        StorageService.instance.unsafeInitialize();
+    }
+
+    @After
+    public void after()
+    {
+        DatabaseDescriptor.setDynamicBadnessThreshold(oldBadness);
+    }
 
     // Repeat all tests some more times since we're dealing with random stuff - i.e. increase the
     // chance to hit issues.
@@ -67,13 +95,6 @@ public class BatchlogEndpointFilterTest
     private static final InetAddressAndPort[] INET_ADDRESSES = new InetAddressAndPort[0];
 
     private DynamicEndpointSnitch dsnitch;
-
-    @BeforeClass
-    public static void beforeClass()
-    {
-        DatabaseDescriptor.daemonInitialization();
-        DatabaseDescriptor.setBroadcastAddress(endpointAddress(0, 0).getAddress());
-    }
 
     @Test
     public void shouldUseLocalRackIfPreferLocalParameter() throws UnknownHostException
@@ -947,9 +968,6 @@ public class BatchlogEndpointFilterTest
                                                            List<String> racks,
                                                            int... nodesPerRack)
     {
-        DatabaseDescriptor.setDynamicBadnessThreshold(0.1);
-        StorageService.instance.unsafeInitialize();
-
         // if any of the three assertions fires, your test is busted
         assert !racks.isEmpty();
         assert racks.size() <= 10;

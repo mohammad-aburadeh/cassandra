@@ -28,7 +28,7 @@ import java.util.stream.Collectors;
 import com.google.common.base.Objects;
 
 import org.apache.cassandra.cql3.ColumnSpecification;
-import org.apache.cassandra.cql3.Maps;
+import org.apache.cassandra.cql3.terms.Maps;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.cql3.functions.Function;
 import org.apache.cassandra.db.TypeSizes;
@@ -39,7 +39,6 @@ import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.serializers.CollectionSerializer;
 import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.utils.Pair;
 
@@ -54,7 +53,7 @@ final class MapSelector extends Selector
         protected Selector deserialize(DataInputPlus in, int version, TableMetadata metadata) throws IOException
         {
             MapType<?, ?> type = (MapType<?, ?>) readType(metadata, in);
-            int size = (int) in.readUnsignedVInt();
+            int size = in.readUnsignedVInt32();
             List<Pair<Selector, Selector>> entries = new ArrayList<>(size);
             for (int i = 0; i < size; i++)
             {
@@ -193,13 +192,13 @@ final class MapSelector extends Selector
         }
     }
 
-    public void addInput(ProtocolVersion protocolVersion, InputRow input)
+    public void addInput(InputRow input)
     {
         for (int i = 0, m = elements.size(); i < m; i++)
         {
             Pair<Selector, Selector> pair = elements.get(i);
-            pair.left.addInput(protocolVersion, input);
-            pair.right.addInput(protocolVersion, input);
+            pair.left.addInput(input);
+            pair.right.addInput(input);
         }
     }
 
@@ -218,7 +217,7 @@ final class MapSelector extends Selector
             buffers.add(entry.getKey());
             buffers.add(entry.getValue());
         }
-        return CollectionSerializer.pack(buffers, elements.size(), protocolVersion);
+        return type.pack(buffers);
     }
 
     public void reset()
@@ -301,7 +300,7 @@ final class MapSelector extends Selector
     protected void serialize(DataOutputPlus out, int version) throws IOException
     {
         writeType(out, type);
-        out.writeUnsignedVInt(elements.size());
+        out.writeUnsignedVInt32(elements.size());
 
         for (int i = 0, m = elements.size(); i < m; i++)
         {

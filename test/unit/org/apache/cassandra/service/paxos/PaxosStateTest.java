@@ -166,7 +166,6 @@ public class PaxosStateTest
         PaxosState.RECENT.clear();
 
         Committed committed = new CommittedWithTTL(accepted, SystemKeyspace.legacyPaxosTtlSec(metadata) + 1);
-
         Committed empty = emptyProposal(key).accepted().committed();
         PaxosState.commitDirect(committed);
 
@@ -220,8 +219,6 @@ public class PaxosStateTest
         Committed committed = new Committed(accepted);
         Committed empty = emptyProposal(key).accepted().committed();
         DatabaseDescriptor.setPaxosStatePurging(legacy); // write with TTLs
-        committed = new CommittedWithTTL(committed, -1); // for equality test
-
         PaxosState.commitDirect(committed);
         committed = new CommittedWithTTL(committed, -1); // for equality test
 

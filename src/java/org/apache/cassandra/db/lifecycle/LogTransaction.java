@@ -22,15 +22,20 @@ import java.io.IOException;
 import java.io.PrintStream;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
 
-import com.codahale.metrics.Counter;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.util.concurrent.Runnables;
 
+import com.codahale.metrics.Counter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -41,15 +46,17 @@ import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.db.compaction.OperationType;
 import org.apache.cassandra.db.lifecycle.LogRecord.Type;
 import org.apache.cassandra.io.FSWriteError;
-import org.apache.cassandra.io.sstable.Component;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.SSTable;
+import org.apache.cassandra.io.sstable.format.SSTableFormat.Components;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.StorageService;
-import org.apache.cassandra.utils.*;
+import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.Throwables;
+import org.apache.cassandra.utils.TimeUUID;
 import org.apache.cassandra.utils.concurrent.Ref;
 import org.apache.cassandra.utils.concurrent.RefCounted;
 import org.apache.cassandra.utils.concurrent.Transactional;
@@ -240,7 +247,7 @@ class LogTransaction extends Transactional.AbstractTransactional implements Tran
         {
             if (!StorageService.instance.isDaemonSetupCompleted())
                 logger.info("Unfinished transaction log, deleting {} ", file);
-            else if (logger.isTraceEnabled())
+            else
                 logger.trace("Deleting {}", file);
 
             Files.delete(file.toPath());
@@ -387,18 +394,13 @@ class LogTransaction extends Transactional.AbstractTransactional implements Tran
                 try
                 {
                     // If we can't successfully delete the DATA component, set the task to be retried later: see TransactionTidier
-                    File datafile = new File(desc.filenameFor(Component.DATA));
 
-                    if (logger.isTraceEnabled())
-                        logger.trace("Tidier running for old sstable {}", desc.baseFilename());
+                    logger.trace("Tidier running for old sstable {}", desc);
 
-                    if (datafile.exists())
-                        delete(datafile);
-                    else if (!wasNew)
+                    if (!desc.fileFor(Components.DATA).exists() && !wasNew)
                         logger.error("SSTableTidier ran with no existing data file for an sstable that was not new");
 
-                    // let the remainder be cleaned up by delete
-                    SSTable.delete(desc, SSTable.discoverComponentsFor(desc));
+                    desc.getFormat().delete(desc);
                 }
                 catch (Throwable t)
                 {

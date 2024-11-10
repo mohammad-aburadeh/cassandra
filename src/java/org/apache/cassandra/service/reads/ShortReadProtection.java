@@ -39,7 +39,6 @@ import org.apache.cassandra.transport.Dispatcher;
  */
 public class ShortReadProtection
 {
-    @SuppressWarnings("resource")
     public static UnfilteredPartitionIterator extend(Replica source,
                                                      Runnable preFetchCallback,
                                                      UnfilteredPartitionIterator partitions,

@@ -23,7 +23,12 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.URI;
 import java.nio.channels.FileChannel;
-import java.nio.file.*; // checkstyle: permit this import
+import java.nio.file.FileSystem;
+import java.nio.file.FileSystems;
+import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
+import java.nio.file.Path;
+import java.nio.file.Paths; // checkstyle: permit this import
 import java.util.Objects;
 import java.util.function.BiPredicate;
 import java.util.function.Consumer;
@@ -31,9 +36,9 @@ import java.util.function.Function;
 import java.util.function.IntFunction;
 import java.util.function.Predicate;
 import java.util.stream.Stream;
-
 import javax.annotation.Nullable;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.util.concurrent.RateLimiter;
 
 import net.openhft.chronicle.core.util.ThrowingFunction;
@@ -122,16 +127,27 @@ public class File implements Comparable<File>
     }
 
     /**
+     * Unsafe constructor that allows a File to use a differet {@link FileSystem} than {@link File#filesystem}.
+     *
+     * The main caller of such a method are cases such as JVM Dtest functions that need access to the logging framwork
+     * files, which exists on in {@link FileSystems#getDefault()}.
+     */
+    @VisibleForTesting
+    public File(FileSystem fs, String first, String... more)
+    {
+        this.path = fs.getPath(first, more);
+    }
+
+    /**
      * @param path the path to wrap
      */
     public File(Path path)
     {
         if (path != null && path.getFileSystem() != filesystem)
-            throw new IllegalArgumentException("Incompatible file system");
+            throw new IllegalArgumentException("Incompatible file system; path FileSystem (" + path.getFileSystem() + ") is not the same reference (" + filesystem + ")");
 
         this.path = path;
     }
-
 
     public static Path getPath(String first, String... more)
     {
@@ -753,6 +769,13 @@ public class File implements Comparable<File>
         return new FileInputStreamPlus(this);
     }
 
+    public File withSuffix(String suffix)
+    {
+        if (path == null)
+            throw new IllegalStateException("Cannot suffix an empty path");
+        return new File(path.getParent().resolve(path.getFileName().toString() + suffix));
+    }
+
     private Path toPathForWrite()
     {
         if (path == null)
@@ -765,6 +788,12 @@ public class File implements Comparable<File>
         if (path == null)
             throw new IllegalStateException("Cannot read from an empty path");
         return path;
+    }
+
+    @VisibleForTesting
+    public static FileSystem unsafeGetFilesystem()
+    {
+        return filesystem;
     }
 
     public static void unsafeSetFilesystem(FileSystem fs)

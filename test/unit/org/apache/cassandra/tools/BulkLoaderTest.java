@@ -39,7 +39,8 @@ public class BulkLoaderTest extends OfflineToolUtils
         
         assertNoUnexpectedThreadsStarted(new String[] { "ObjectCleanerThread",
                                                         "Shutdown-checker",
-                                                        "cluster[0-9]-connection-reaper-[0-9]" });
+                                                        "cluster[0-9]-connection-reaper-[0-9]" },
+                                         false);
         assertSchemaNotLoaded();
         assertCLSMNotLoaded();
         assertSystemKSNotLoaded();
@@ -65,7 +66,11 @@ public class BulkLoaderTest extends OfflineToolUtils
                                                         "globalEventExecutor-[1-9]-[1-9]",
                                                         "globalEventExecutor-[1-9]-[1-9]",
                                                         "Shutdown-checker",
-                                                        "cluster[0-9]-connection-reaper-[0-9]" });
+                                                        "cluster[0-9]-connection-reaper-[0-9]",
+                                                        "Attach Listener",
+                                                        "process reaper",
+                                                        "JNA Cleaner"},
+                                         false);
         assertSchemaNotLoaded();
         assertCLSMNotLoaded();
         assertSystemKSNotLoaded();
@@ -94,12 +99,16 @@ public class BulkLoaderTest extends OfflineToolUtils
                                                         "globalEventExecutor-[1-9]-[1-9]",
                                                         "Shutdown-checker",
                                                         "cluster[0-9]-connection-reaper-[0-9]",
+                                                        "Attach Listener",
+                                                        "process reaper",
+                                                        "JNA Cleaner",
                                                         // the driver isn't expected to terminate threads on close synchronously (CASSANDRA-19000)
-                                                        "cluster[0-9]-nio-worker-[0-9]" });
-        assertSchemaNotLoaded();
-        assertCLSMNotLoaded();
-        assertSystemKSNotLoaded();
-        assertKeyspaceNotLoaded();
+                                                        "cluster[0-9]-nio-worker-[0-9]" },
+                                         false);
+    assertSchemaNotLoaded();
+    assertCLSMNotLoaded();
+    assertSystemKSNotLoaded();
+    assertKeyspaceNotLoaded();
         assertServerNotLoaded();
     }
 
@@ -124,8 +133,12 @@ public class BulkLoaderTest extends OfflineToolUtils
                                                         "globalEventExecutor-[1-9]-[1-9]",
                                                         "Shutdown-checker",
                                                         "cluster[0-9]-connection-reaper-[0-9]",
+                                                        "Attach Listener",
+                                                        "process reaper",
+                                                        "JNA Cleaner",
                                                         // the driver isn't expected to terminate threads on close synchronously (CASSANDRA-19000)
-                                                        "cluster[0-9]-nio-worker-[0-9]" });
+                                                        "cluster[0-9]-nio-worker-[0-9]" },
+                                         false);
         assertSchemaNotLoaded();
         assertCLSMNotLoaded();
         assertSystemKSNotLoaded();

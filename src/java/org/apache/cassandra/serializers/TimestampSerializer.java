@@ -104,7 +104,7 @@ public class TimestampSerializer extends TypeSerializer<Date>
 
     private static final Pattern timestampPattern = Pattern.compile("^-?\\d+$");
 
-    private static final FastThreadLocal<Format> FORMATTER_UTC = new FastThreadLocal<Format>()
+    private static final FastThreadLocal<Format> FORMATTER_UTC = new FastThreadLocal<>()
     {
         protected java.text.Format initialValue()
         {
@@ -117,7 +117,7 @@ public class TimestampSerializer extends TypeSerializer<Date>
         }
     };
 
-    private static final FastThreadLocal<Format> FORMATTER_TO_JSON = new FastThreadLocal<Format>()
+    private static final FastThreadLocal<Format> FORMATTER_TO_JSON = new FastThreadLocal<>()
     {
         protected java.text.Format initialValue()
         {
@@ -202,15 +202,15 @@ public class TimestampSerializer extends TypeSerializer<Date>
         return Date.class;
     }
 
-    /**
-     * Builds CQL literal for a timestamp using time zone UTC and fixed date format.
-     * @see #FORMATTER_UTC
-     */
     @Override
-    public String toCQLLiteral(ByteBuffer buffer)
+    public boolean shouldQuoteCQLLiterals()
     {
-        return buffer == null || !buffer.hasRemaining()
-               ? "null"
-               : FORMATTER_UTC.get().format(deserialize(buffer).toInstant());
+        return true;
+    }
+
+    @Override
+    protected String toCQLLiteralNonNull(ByteBuffer buffer)
+    {
+        return FORMATTER_UTC.get().format(deserialize(buffer).toInstant());
     }
 }

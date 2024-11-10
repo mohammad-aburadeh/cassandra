@@ -185,7 +185,7 @@ public final class DistributedRepairUtils
                     TimeUUID pendingRepair = sstable.getSSTableMetadata().pendingRepair;
                     if (pendingRepair == null)
                         continue;
-                    LocalSession session = ActiveRepairService.instance.consistent.local.getSession(pendingRepair);
+                    LocalSession session = ActiveRepairService.instance().consistent.local.getSession(pendingRepair);
                     // repair maybe async, so some participates may still think the repair is active, which means the sstable SHOULD link to it
                     if (session != null && !session.isCompleted())
                         continue;

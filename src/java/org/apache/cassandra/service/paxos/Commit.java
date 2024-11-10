@@ -110,7 +110,7 @@ public class Commit
             return new Committed(ballot, update);
         }
 
-        boolean isExpired(int nowInSec)
+        boolean isExpired(long nowInSec)
         {
             return false;
         }
@@ -139,21 +139,21 @@ public class Commit
             return new AcceptedWithTTL(copy, nowInSeconds() + legacyPaxosTtlSec(copy.update.metadata()));
         }
 
-        public final int localDeletionTime;
+        public final long localDeletionTime;
 
-        public AcceptedWithTTL(Commit copy, int localDeletionTime)
+        public AcceptedWithTTL(Commit copy, long localDeletionTime)
         {
             super(copy);
             this.localDeletionTime = localDeletionTime;
         }
 
-        public AcceptedWithTTL(Ballot ballot, PartitionUpdate update, int localDeletionTime)
+        public AcceptedWithTTL(Ballot ballot, PartitionUpdate update, long localDeletionTime)
         {
             super(ballot, update);
             this.localDeletionTime = localDeletionTime;
         }
 
-        boolean isExpired(int nowInSec)
+        boolean isExpired(long nowInSec)
         {
             return nowInSec >= localDeletionTime;
         }
@@ -226,21 +226,21 @@ public class Commit
             return new CommittedWithTTL(copy, nowInSeconds() + legacyPaxosTtlSec(copy.update.metadata()));
         }
 
-        public final int localDeletionTime;
+        public final long localDeletionTime;
 
-        public CommittedWithTTL(Ballot ballot, PartitionUpdate update, int localDeletionTime)
+        public CommittedWithTTL(Ballot ballot, PartitionUpdate update, long localDeletionTime)
         {
             super(ballot, update);
             this.localDeletionTime = localDeletionTime;
         }
 
-        public CommittedWithTTL(Commit copy, int localDeletionTime)
+        public CommittedWithTTL(Commit copy, long localDeletionTime)
         {
             super(copy);
             this.localDeletionTime = localDeletionTime;
         }
 
-        boolean isExpired(int nowInSec)
+        boolean isExpired(long nowInSec)
         {
             return nowInSec >= localDeletionTime;
         }
@@ -274,7 +274,8 @@ public class Commit
         return new Commit(Ballot.none(), PartitionUpdate.emptyUpdate(metadata, partitionKey));
     }
 
-    @Deprecated
+    /** @deprecated See CASSANDRA-17164 */
+    @Deprecated(since = "4.1")
     public static Commit newProposal(Ballot ballot, PartitionUpdate update)
     {
         update = withTimestamp(update, ballot.unixMicros());

@@ -20,15 +20,17 @@ package org.apache.cassandra.net;
 import java.io.IOException;
 import java.nio.channels.ClosedChannelException;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.stream.Collectors;
 
 import com.google.common.annotations.VisibleForTesting;
-
-import org.apache.cassandra.utils.concurrent.AsyncPromise;
-import org.apache.cassandra.utils.concurrent.FutureCombiner;
+import com.google.common.collect.Lists;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -44,6 +46,9 @@ import org.apache.cassandra.metrics.MessagingMetrics;
 import org.apache.cassandra.service.AbstractWriteResponseHandler;
 import org.apache.cassandra.utils.ExecutorUtils;
 import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.concurrent.AsyncPromise;
+import org.apache.cassandra.utils.concurrent.FutureCombiner;
+import org.apache.cassandra.utils.concurrent.Promise;
 
 import static java.util.Collections.synchronizedList;
 import static java.util.concurrent.TimeUnit.MINUTES;
@@ -200,26 +205,40 @@ import static org.apache.cassandra.utils.Throwables.maybeFail;
  * implemented in {@link org.apache.cassandra.db.virtual.InternodeInboundTable} and
  * {@link org.apache.cassandra.db.virtual.InternodeOutboundTable} respectively.
  */
-public class MessagingService extends MessagingServiceMBeanImpl
+public class MessagingService extends MessagingServiceMBeanImpl implements MessageDelivery
 {
     private static final Logger logger = LoggerFactory.getLogger(MessagingService.class);
 
     // 8 bits version, so don't waste versions
-    public static final int VERSION_30 = 10;
-    public static final int VERSION_3014 = 11;
-    public static final int VERSION_40 = 12;
-    public static final int VERSION_41 = 13;
-    public static final int minimum_version = VERSION_30;
-    public static final int current_version = VERSION_40;
-    static AcceptVersions accept_messaging = new AcceptVersions(minimum_version, current_version);
-    static AcceptVersions accept_streaming = new AcceptVersions(current_version, current_version);
-    public static String SSL_FACTORY_CONTEXT_DESCRIPTION = "server_encryption_options";
-
     public enum Version
     {
+        /** @deprecated See CASSANDRA-18314 */
+        @Deprecated(since = "5.0")
         VERSION_30(10),
+        /** @deprecated See CASSANDRA-18314 */
+        @Deprecated(since = "5.0")
         VERSION_3014(11),
-        VERSION_40(12);
+        VERSION_40(12),
+        // c14227 TTL overflow, 'uint' timestamps
+        VERSION_50(13),
+        VERSION_51(14);
+
+        public static final Version CURRENT;
+
+        private static final Logger logger = LoggerFactory.getLogger(Version.class);
+
+        static
+        {
+             if (DatabaseDescriptor.getStorageCompatibilityMode().isBefore(5))
+             {
+                 logger.warn("Starting in storage compatibility mode " + DatabaseDescriptor.getStorageCompatibilityMode());
+                 CURRENT = VERSION_40;
+             }
+             else
+             {
+                 CURRENT = VERSION_51;
+             }
+        }
 
         public final int value;
 
@@ -227,6 +246,66 @@ public class MessagingService extends MessagingServiceMBeanImpl
         {
             this.value = value;
         }
+
+        public static List<Version> supportedVersions()
+        {
+            List<Version> versions = Lists.newArrayList();
+            for (Version version : values())
+                if (minimum_version <= version.value)
+                    versions.add(version);
+
+            return Collections.unmodifiableList(versions);
+        }
+    }
+    // Maintance Note:
+    // Try to keep Version enum in-sync for testing.  By having the versions in the enum tests can get access without forcing this class
+    // to load, which adds a lot of costs to each test
+    /** @deprecated See CASSANDRA-18816 */
+    @Deprecated(since = "5.0")
+    public static final int VERSION_30 = 10;
+    /** @deprecated See CASSANDRA-18816 */
+    @Deprecated(since = "5.0")
+    public static final int VERSION_3014 = 11;
+    public static final int VERSION_40 = 12;
+    public static final int VERSION_50 = 13; // c14227 TTL overflow, 'uint' timestamps
+    public static final int VERSION_51 = 14; // TCM
+    public static final int minimum_version = VERSION_40;
+    public static final int maximum_version = VERSION_51;
+    // we want to use a modified behavior for the tools and clients - that is, since they are not running a server, they
+    // should not need to run in a compatibility mode. They should be able to connect to the server regardless whether
+    // it uses messaving version 4 or 5
+    public static final int current_version = DatabaseDescriptor.getStorageCompatibilityMode().isBefore(5) ? VERSION_40 : VERSION_51;
+    static AcceptVersions accept_messaging;
+    static AcceptVersions accept_streaming;
+    static
+    {
+        if (DatabaseDescriptor.isClientInitialized())
+        {
+            accept_messaging = new AcceptVersions(minimum_version, maximum_version);
+            accept_streaming = new AcceptVersions(minimum_version, maximum_version);
+        }
+        else
+        {
+            accept_messaging = new AcceptVersions(minimum_version, current_version);
+            accept_streaming = new AcceptVersions(current_version, current_version);
+        }
+    }
+    static Map<Integer, Integer> versionOrdinalMap = Arrays.stream(Version.values()).collect(Collectors.toMap(v -> v.value, v -> v.ordinal()));
+
+    /**
+     * This is an optimisation to speed up the translation of the serialization
+     * version to the {@link Version} enum ordinal.
+     *
+     * @param version the serialization version
+     * @return a {@link Version} ordinal value
+     */
+    public static int getVersionOrdinal(int version)
+    {
+        Integer ordinal = versionOrdinalMap.get(version);
+        if (ordinal == null)
+            throw new IllegalStateException("Unkown serialization version: " + version);
+
+        return ordinal;
     }
 
     private static class MSHandle
@@ -276,13 +355,14 @@ public class MessagingService extends MessagingServiceMBeanImpl
         OutboundConnections.scheduleUnusedConnectionMonitoring(this, ScheduledExecutors.scheduledTasks, 1L, TimeUnit.HOURS);
     }
 
-    public <T> org.apache.cassandra.utils.concurrent.Future<Message<T>> sendWithResult(Message message, InetAddressAndPort to)
+    @Override
+    public <REQ, RSP> org.apache.cassandra.utils.concurrent.Future<Message<RSP>> sendWithResult(Message<REQ> message, InetAddressAndPort to)
     {
-        AsyncPromise<Message<T>> promise = new AsyncPromise<>();
-        MessagingService.instance().sendWithCallback(message, to, new RequestCallback<T>()
+        AsyncPromise<Message<RSP>> promise = new AsyncPromise<>();
+        sendWithCallback(message, to, new RequestCallback<RSP>()
         {
             @Override
-            public void onResponse(Message<T> msg)
+            public void onResponse(Message<RSP> msg)
             {
                 promise.trySuccess(msg);
             }
@@ -334,12 +414,14 @@ public class MessagingService extends MessagingServiceMBeanImpl
      * @param cb      callback interface which is used to pass the responses or
      *                suggest that a timeout occurred to the invoker of the send().
      */
-    public void sendWithCallback(Message message, InetAddressAndPort to, RequestCallback cb)
+    @Override
+    public <REQ, RSP> void sendWithCallback(Message<REQ> message, InetAddressAndPort to, RequestCallback<RSP> cb)
     {
         sendWithCallback(message, to, cb, null);
     }
 
-    public void sendWithCallback(Message message, InetAddressAndPort to, RequestCallback cb, ConnectionType specifyConnection)
+    @Override
+    public <REQ, RSP> void sendWithCallback(Message<REQ> message, InetAddressAndPort to, RequestCallback<RSP> cb, ConnectionType specifyConnection)
     {
         callbacks.addWithExpiration(cb, message, to);
         if (cb.invokeOnFailure() && !message.callBackOnFailure())
@@ -372,7 +454,8 @@ public class MessagingService extends MessagingServiceMBeanImpl
      * @param message messages to be sent.
      * @param to      endpoint to which the message needs to be sent
      */
-    public void send(Message message, InetAddressAndPort to)
+    @Override
+    public <REQ> void send(Message<REQ> message, InetAddressAndPort to)
     {
         send(message, to, null);
     }
@@ -389,13 +472,44 @@ public class MessagingService extends MessagingServiceMBeanImpl
         send(message.responseWith(response), message.respondTo());
     }
 
-    public <V> void respondWithFailure(RequestFailureReason reason, Message<?> message)
+    public <RSP> Future<RSP> sendWithResponse(InetAddressAndPort to, Message<?> msg)
     {
-        send(Message.failureResponse(message.id(), message.expiresAtNanos(), reason), message.respondTo());
+        Promise<RSP> future = AsyncPromise.uncancellable();
+        MessagingService.instance().sendWithCallback(msg, to,
+                                                     new RequestCallback<RSP>()
+                                                     {
+                                                         @Override
+                                                         public void onResponse(Message<RSP> msg)
+                                                         {
+                                                             future.setSuccess(msg.payload);
+                                                         }
+
+                                                         @Override
+                                                         public void onFailure(InetAddressAndPort from, RequestFailureReason failureReason)
+                                                         {
+                                                             future.setFailure(new RuntimeException(failureReason.toString()));
+                                                         }
+                                                     });
+
+        return future;
+    }
+
+    public void respondWithFailure(RequestFailureReason reason, Message<?> message)
+    {
+        Message<?> r = Message.failureResponse(message.id(), message.expiresAtNanos(), reason);
+        if (r.header.hasFlag(MessageFlag.URGENT))
+            r = r.withFlag(MessageFlag.URGENT);
+        send(r, message.respondTo());
     }
 
     public void send(Message message, InetAddressAndPort to, ConnectionType specifyConnection)
     {
+        if (isShuttingDown)
+        {
+            logger.warn("Cannot send the message {} to {}, as messaging service is shutting down", message, to);
+            return;
+        }
+
         if (logger.isTraceEnabled())
         {
             logger.trace("{} sending {} to {}@{}", FBUtilities.getBroadcastAddressAndPort(), message.verb(), message.id(), to);
@@ -477,7 +591,10 @@ public class MessagingService extends MessagingServiceMBeanImpl
     {
         OutboundConnections pool = channelManagers.get(to);
         if (pool != null)
+        {
             pool.interrupt();
+            logger.info("Interrupted outbound connections to {}", to);
+        }
     }
 
     /**
@@ -641,5 +758,17 @@ public class MessagingService extends MessagingServiceMBeanImpl
     public void waitUntilListening() throws InterruptedException
     {
         inboundSockets.open().await();
+    }
+
+    public void waitUntilListeningUnchecked()
+    {
+        try
+        {
+            inboundSockets.open().await();
+        }
+        catch (InterruptedException e)
+        {
+            throw new RuntimeException(e);
+        }
     }
 }

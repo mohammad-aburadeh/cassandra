@@ -27,28 +27,33 @@ import org.junit.Assert;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.config.EncryptionOptions;
 import org.apache.cassandra.config.ParameterizedClass;
+import org.apache.cassandra.distributed.shared.WithProperties;
+import org.apache.cassandra.transport.TlsTestUtils;
+
+import static org.apache.cassandra.config.CassandraRelevantProperties.CASSANDRA_CONFIG;
+
+import static org.apache.cassandra.config.EncryptionOptions.ClientAuth.NOT_REQUIRED;
 
 public class FileBasedSslContextFactoryTest
 {
-    private static final Logger logger = LoggerFactory.getLogger(FileBasedSslContextFactoryTest.class);
-
     private EncryptionOptions.ServerEncryptionOptions encryptionOptions;
+
+    static WithProperties properties;
 
     @BeforeClass
     public static void setupDatabaseDescriptor()
     {
-        System.setProperty("cassandra.config", "cassandra.yaml");
+        CASSANDRA_CONFIG.reset();
+        properties = new WithProperties();
     }
 
     @AfterClass
     public static void tearDownDatabaseDescriptor()
     {
-        System.clearProperty("cassandra.config");
+        properties.close();
     }
 
     @Before
@@ -57,12 +62,14 @@ public class FileBasedSslContextFactoryTest
         encryptionOptions = new EncryptionOptions.ServerEncryptionOptions()
                             .withSslContextFactory(new ParameterizedClass(TestFileBasedSSLContextFactory.class.getName(),
                                                                           new HashMap<>()))
-                            .withTrustStore("test/conf/cassandra_ssl_test.truststore")
-                            .withTrustStorePassword("cassandra")
-                            .withRequireClientAuth(false)
+                            .withTrustStore(TlsTestUtils.SERVER_TRUSTSTORE_PATH)
+                            .withTrustStorePassword(TlsTestUtils.SERVER_TRUSTSTORE_PASSWORD)
+                            .withRequireClientAuth(NOT_REQUIRED)
                             .withCipherSuites("TLS_RSA_WITH_AES_128_CBC_SHA")
-                            .withKeyStore("test/conf/cassandra_ssl_test.keystore")
-                            .withKeyStorePassword("cassandra");
+                            .withKeyStore(TlsTestUtils.SERVER_KEYSTORE_PATH)
+                            .withKeyStorePassword(TlsTestUtils.SERVER_KEYSTORE_PASSWORD)
+                            .withOutboundKeystore(TlsTestUtils.SERVER_OUTBOUND_KEYSTORE_PATH)
+                            .withOutboundKeystorePassword(TlsTestUtils.SERVER_OUTBOUND_KEYSTORE_PASSWORD);
     }
 
     @Test
@@ -73,6 +80,7 @@ public class FileBasedSslContextFactoryTest
         Assert.assertEquals("org.apache.cassandra.security.FileBasedSslContextFactoryTest$TestFileBasedSSLContextFactory",
                             localEncryptionOptions.ssl_context_factory.class_name);
         Assert.assertNotNull("keystore_password must not be null", localEncryptionOptions.keystore_password);
+        Assert.assertNotNull("outbound_keystore_password must not be null", localEncryptionOptions.outbound_keystore_password);
 
         TestFileBasedSSLContextFactory sslContextFactory =
         (TestFileBasedSSLContextFactory) localEncryptionOptions.sslContextFactoryInstance;
@@ -81,18 +89,21 @@ public class FileBasedSslContextFactoryTest
     }
 
     /**
-     * Tests that empty {@code keystore_password} is allowed.
+     * Tests that empty {@code keystore_password} and {@code outbound_keystore_password} is allowed.
      */
     @Test
     public void testEmptyKeystorePasswords() throws SSLException
     {
         EncryptionOptions.ServerEncryptionOptions localEncryptionOptions = encryptionOptions
                                                                            .withKeyStorePassword("")
-                                                                           .withKeyStore("test/conf/cassandra_ssl_test_nopassword.keystore");
+                                                                           .withKeyStore("test/conf/cassandra_ssl_test_nopassword.keystore")
+                                                                           .withOutboundKeystorePassword("")
+                                                                           .withOutboundKeystore("test/conf/cassandra_ssl_test_nopassword.keystore");
 
         Assert.assertEquals("org.apache.cassandra.security.FileBasedSslContextFactoryTest$TestFileBasedSSLContextFactory",
                             localEncryptionOptions.ssl_context_factory.class_name);
         Assert.assertEquals("keystore_password must be empty", "", localEncryptionOptions.keystore_password);
+        Assert.assertEquals("outbound_keystore_password must empty", "", localEncryptionOptions.outbound_keystore_password);
 
         TestFileBasedSSLContextFactory sslContextFactory =
         (TestFileBasedSSLContextFactory) localEncryptionOptions.sslContextFactoryInstance;
@@ -112,6 +123,7 @@ public class FileBasedSslContextFactoryTest
         Assert.assertEquals("org.apache.cassandra.security.FileBasedSslContextFactoryTest$TestFileBasedSSLContextFactory",
                             localEncryptionOptions.ssl_context_factory.class_name);
         Assert.assertNull("keystore_password must be null", localEncryptionOptions.keystore_password);
+        Assert.assertNotNull("outbound_keystore_password must not be null", localEncryptionOptions.outbound_keystore_password);
 
         TestFileBasedSSLContextFactory sslContextFactory =
         (TestFileBasedSSLContextFactory) localEncryptionOptions.sslContextFactoryInstance;
@@ -127,6 +139,26 @@ public class FileBasedSslContextFactoryTest
         }
     }
 
+    /**
+     * Tests for the empty password for the {@code outbound_keystore}. Since the {@code outbound_keystore_password} defaults
+     * to the {@code keystore_password}, this test should pass without exceptions.
+     */
+    @Test
+    public void testOnlyEmptyOutboundKeystorePassword() throws SSLException
+    {
+        EncryptionOptions.ServerEncryptionOptions localEncryptionOptions = encryptionOptions.withOutboundKeystorePassword(null);
+
+        Assert.assertEquals("org.apache.cassandra.security.FileBasedSslContextFactoryTest$TestFileBasedSSLContextFactory",
+                            localEncryptionOptions.ssl_context_factory.class_name);
+        Assert.assertNotNull("keystore_password must not be null", localEncryptionOptions.keystore_password);
+        Assert.assertNull("outbound_keystore_password must be null", localEncryptionOptions.outbound_keystore_password);
+
+        TestFileBasedSSLContextFactory sslContextFactory =
+        (TestFileBasedSSLContextFactory) localEncryptionOptions.sslContextFactoryInstance;
+        sslContextFactory.buildKeyManagerFactory();
+        sslContextFactory.buildTrustManagerFactory();
+    }
+
     @Test
     public void testEmptyTruststorePassword() throws SSLException
     {
@@ -134,6 +166,7 @@ public class FileBasedSslContextFactoryTest
         Assert.assertEquals("org.apache.cassandra.security.FileBasedSslContextFactoryTest$TestFileBasedSSLContextFactory",
                             localEncryptionOptions.ssl_context_factory.class_name);
         Assert.assertNotNull("keystore_password must not be null", localEncryptionOptions.keystore_password);
+        Assert.assertNotNull("outbound_keystore_password must not be null", localEncryptionOptions.outbound_keystore_password);
         Assert.assertNull("truststore_password must be null", localEncryptionOptions.truststore_password);
 
         TestFileBasedSSLContextFactory sslContextFactory =

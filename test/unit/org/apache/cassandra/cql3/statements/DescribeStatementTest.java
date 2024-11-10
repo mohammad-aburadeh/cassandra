@@ -18,6 +18,8 @@
 package org.apache.cassandra.cql3.statements;
 
 import java.util.Iterator;
+import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 
 import com.google.common.collect.ImmutableList;
@@ -31,22 +33,27 @@ import com.datastax.driver.core.SimpleStatement;
 import com.datastax.driver.core.exceptions.InvalidQueryException;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQLTester;
+import org.apache.cassandra.cql3.CqlBuilder;
 import org.apache.cassandra.dht.Token;
+import org.apache.cassandra.index.internal.CassandraIndex;
 import org.apache.cassandra.locator.InetAddressAndPort;
-import org.apache.cassandra.locator.TokenMetadata;
+import org.apache.cassandra.schema.CompactionParams;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.TableId;
-import org.apache.cassandra.service.StorageService;
+import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.transport.ProtocolVersion;
 
 import static java.lang.String.format;
 import static org.apache.cassandra.schema.SchemaConstants.AUTH_KEYSPACE_NAME;
 import static org.apache.cassandra.schema.SchemaConstants.DISTRIBUTED_KEYSPACE_NAME;
+import static org.apache.cassandra.schema.SchemaConstants.METADATA_KEYSPACE_NAME;
 import static org.apache.cassandra.schema.SchemaConstants.SCHEMA_KEYSPACE_NAME;
 import static org.apache.cassandra.schema.SchemaConstants.SYSTEM_KEYSPACE_NAME;
 import static org.apache.cassandra.schema.SchemaConstants.TRACE_KEYSPACE_NAME;
 import static org.apache.cassandra.schema.SchemaConstants.VIRTUAL_SCHEMA;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -306,6 +313,7 @@ public class DescribeStatementTest extends CQLTester
                                                   row(KEYSPACE_PER_TEST, "keyspace", KEYSPACE_PER_TEST),
                                                   row(SYSTEM_KEYSPACE_NAME, "keyspace", SYSTEM_KEYSPACE_NAME),
                                                   row(AUTH_KEYSPACE_NAME, "keyspace", AUTH_KEYSPACE_NAME),
+                                                  row(METADATA_KEYSPACE_NAME, "keyspace", METADATA_KEYSPACE_NAME),
                                                   row(DISTRIBUTED_KEYSPACE_NAME, "keyspace", DISTRIBUTED_KEYSPACE_NAME),
                                                   row(SCHEMA_KEYSPACE_NAME, "keyspace", SCHEMA_KEYSPACE_NAME),
                                                   row(TRACE_KEYSPACE_NAME, "keyspace", TRACE_KEYSPACE_NAME),
@@ -442,24 +450,30 @@ public class DescribeStatementTest extends CQLTester
         {
             assertRowsNet(executeDescribeNet(describeKeyword + " CLUSTER"),
                           row("Test Cluster",
-                              "ByteOrderedPartitioner",
+                              trimIfPresent(DatabaseDescriptor.getPartitionerName(), "org.apache.cassandra.dht."),
                               DatabaseDescriptor.getEndpointSnitch().getClass().getName()));
 
             assertRowsNet(executeDescribeNet("system_virtual_schema", describeKeyword + " CLUSTER"),
                           row("Test Cluster",
-                              "ByteOrderedPartitioner",
+                              trimIfPresent(DatabaseDescriptor.getPartitionerName(), "org.apache.cassandra.dht."),
                               DatabaseDescriptor.getEndpointSnitch().getClass().getName()));
         }
-
-        TokenMetadata tokenMetadata = StorageService.instance.getTokenMetadata();
-        Token token = tokenMetadata.sortedTokens().get(0);
-        InetAddressAndPort addressAndPort = tokenMetadata.getAllEndpoints().iterator().next();
+        ClusterMetadata metadata = ClusterMetadata.current();
+        Token token = metadata.tokenMap.tokens().get(0);
+        InetAddressAndPort addressAndPort = metadata.directory.allAddresses().iterator().next();
 
         assertRowsNet(executeDescribeNet(KEYSPACE_PER_TEST, "DESCRIBE CLUSTER"),
                       row("Test Cluster",
-                          "ByteOrderedPartitioner",
+                          trimIfPresent(DatabaseDescriptor.getPartitionerName(), "org.apache.cassandra.dht."),
                           DatabaseDescriptor.getEndpointSnitch().getClass().getName(),
                           ImmutableMap.of(token.toString(), ImmutableList.of(addressAndPort.toString()))));
+    }
+
+    private String trimIfPresent(String src, String begin)
+    {
+        if (src.startsWith(begin))
+            return src.substring(begin.length());
+        return src;
     }
 
     @Test
@@ -809,6 +823,56 @@ public class DescribeStatementTest extends CQLTester
     }
 
     @Test
+    public void testDescribeTableWithColumnMasks() throws Throwable
+    {
+        requireNetwork();
+        DatabaseDescriptor.setDynamicDataMaskingEnabled(true);
+
+        String table = createTable(KEYSPACE_PER_TEST,
+                                   "CREATE TABLE %s (" +
+                                   "  pk1 text, " +
+                                   "  pk2 int MASKED WITH DEFAULT, " +
+                                   "  ck1 int, " +
+                                   "  ck2 int MASKED WITH mask_default()," +
+                                   "  s1 decimal static, " +
+                                   "  s2 decimal static MASKED WITH mask_null(), " +
+                                   "  v1 text, " +
+                                   "  v2 text MASKED WITH mask_inner(1, null), " +
+                                   "PRIMARY KEY ((pk1, pk2), ck1, ck2 ))");
+
+        TableMetadata tableMetadata = Schema.instance.getTableMetadata(KEYSPACE_PER_TEST, table);
+        assertNotNull(tableMetadata);
+
+        String tableCreateStatement = "CREATE TABLE " + KEYSPACE_PER_TEST + "." + table + " (\n" +
+                                      "    pk1 text,\n" +
+                                      "    pk2 int MASKED WITH system.mask_default(),\n" +
+                                      "    ck1 int,\n" +
+                                      "    ck2 int MASKED WITH system.mask_default(),\n" +
+                                      "    s1 decimal static,\n" +
+                                      "    s2 decimal static MASKED WITH system.mask_null(),\n" +
+                                      "    v1 text,\n" +
+                                      "    v2 text MASKED WITH system.mask_inner(1, null),\n" +
+                                      "    PRIMARY KEY ((pk1, pk2), ck1, ck2)\n" +
+                                      ") WITH ID = " + tableMetadata.id + "\n" +
+                                      "    AND CLUSTERING ORDER BY (ck1 ASC, ck2 ASC)\n" +
+                                      "    AND " + tableParametersCql();
+
+        assertRowsNet(executeDescribeNet("DESCRIBE TABLE " + KEYSPACE_PER_TEST + "." + table + " WITH INTERNALS"),
+                      row(KEYSPACE_PER_TEST,
+                          "table",
+                          table,
+                          tableCreateStatement));
+
+        // masks should be listed even if DDM is disabled
+        DatabaseDescriptor.setDynamicDataMaskingEnabled(false);
+        assertRowsNet(executeDescribeNet("DESCRIBE TABLE " + KEYSPACE_PER_TEST + "." + table + " WITH INTERNALS"),
+                      row(KEYSPACE_PER_TEST,
+                          "table",
+                          table,
+                          tableCreateStatement));
+    }
+
+    @Test
     public void testUsingReservedInCreateType() throws Throwable
     {
         String type = createType(KEYSPACE_PER_TEST, "CREATE TYPE %s (\"token\" text, \"desc\" text);");
@@ -950,7 +1014,11 @@ public class DescribeStatementTest extends CQLTester
 
     private static String indexOutput(String index, String table, String col)
     {
-        return format("CREATE INDEX %s ON %s.%s (%s);", index, "test", table, col);
+        if (Objects.equals(DatabaseDescriptor.getDefaultSecondaryIndex(), CassandraIndex.NAME))
+            return format("CREATE INDEX %s ON %s.%s (%s) USING '" + CassandraIndex.NAME + "';", index, "test", table, col);
+        else
+            return format("CREATE CUSTOM INDEX %s ON %s.%s (%s) USING '%s';",
+                          index, "test", table, col, DatabaseDescriptor.getDefaultSecondaryIndex());
     }
 
     private static String usersMvTableOutput()
@@ -989,17 +1057,19 @@ public class DescribeStatementTest extends CQLTester
     private static String tableParametersCql()
     {
         return "additional_write_policy = '99p'\n" +
+               "    AND allow_auto_snapshot = true\n" +
                "    AND bloom_filter_fp_chance = 0.01\n" +
                "    AND caching = {'keys': 'ALL', 'rows_per_partition': 'NONE'}\n" +
                "    AND cdc = false\n" +
                "    AND comment = ''\n" +
-               "    AND compaction = {'class': 'org.apache.cassandra.db.compaction.SizeTieredCompactionStrategy', 'max_threshold': '32', 'min_threshold': '4'}\n" +
+               "    AND compaction = " + cqlQuoted(CompactionParams.DEFAULT.asMap()) + "\n" +
                "    AND compression = {'chunk_length_in_kb': '16', 'class': 'org.apache.cassandra.io.compress.LZ4Compressor'}\n" +
                "    AND memtable = 'default'\n" +
                "    AND crc_check_chance = 1.0\n" +
                "    AND default_time_to_live = 0\n" +
                "    AND extensions = {}\n" +
                "    AND gc_grace_seconds = 864000\n" +
+               "    AND incremental_backups = true\n" +
                "    AND max_index_interval = 2048\n" +
                "    AND memtable_flush_period_in_ms = 0\n" +
                "    AND min_index_interval = 128\n" +
@@ -1007,19 +1077,26 @@ public class DescribeStatementTest extends CQLTester
                "    AND speculative_retry = '99p';";
     }
 
+    private static String cqlQuoted(Map<String, String> map)
+    {
+        return new CqlBuilder().append(map).toString();
+    }
+
     private static String mvParametersCql()
     {
         return "additional_write_policy = '99p'\n" +
+               "    AND allow_auto_snapshot = true\n" +
                "    AND bloom_filter_fp_chance = 0.01\n" +
                "    AND caching = {'keys': 'ALL', 'rows_per_partition': 'NONE'}\n" +
                "    AND cdc = false\n" +
                "    AND comment = ''\n" +
-               "    AND compaction = {'class': 'org.apache.cassandra.db.compaction.SizeTieredCompactionStrategy', 'max_threshold': '32', 'min_threshold': '4'}\n" +
+               "    AND compaction = " + cqlQuoted(CompactionParams.DEFAULT.asMap()) + "\n" +
                "    AND compression = {'chunk_length_in_kb': '16', 'class': 'org.apache.cassandra.io.compress.LZ4Compressor'}\n" +
                "    AND memtable = 'default'\n" +
                "    AND crc_check_chance = 1.0\n" +
                "    AND extensions = {}\n" +
                "    AND gc_grace_seconds = 864000\n" +
+               "    AND incremental_backups = true\n" +
                "    AND max_index_interval = 2048\n" +
                "    AND memtable_flush_period_in_ms = 0\n" +
                "    AND min_index_interval = 128\n" +
@@ -1063,10 +1140,5 @@ public class DescribeStatementTest extends CQLTester
         if (useKs != null)
             executeNet(v, "USE " + useKs);
         return v;
-    }
-
-    private static Object[][] rows(Object[]... rows)
-    {
-        return rows;
     }
 }

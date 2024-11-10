@@ -26,7 +26,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -46,15 +45,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 public class CQLSSTableWriterConcurrencyTest extends CQLTester
 {
-    private static final Logger LOGGER = LoggerFactory.getLogger(CQLSSTableWriterTest.class);
+    private static final Logger LOGGER = LoggerFactory.getLogger(CQLSSTableWriterConcurrencyTest.class);
     @Rule
     public TemporaryFolder tempFolder = new TemporaryFolder();
-
-    @BeforeClass
-    public static void setUpClass()
-    {
-        CQLTester.setUpClass();
-    }
 
     @Test
     public void testConcurrentSchemaModification() throws InterruptedException, IOException

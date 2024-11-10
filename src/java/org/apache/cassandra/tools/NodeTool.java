@@ -45,6 +45,8 @@ import java.util.Map.Entry;
 import java.util.Scanner;
 import java.util.SortedMap;
 
+import javax.management.InstanceNotFoundException;
+
 import com.google.common.base.Joiner;
 import com.google.common.base.Throwables;
 
@@ -92,11 +94,10 @@ public class NodeTool
     public int execute(String... args)
     {
         List<Class<? extends NodeToolCmdRunnable>> commands = newArrayList(
+                AbortBootstrap.class,
                 Assassinate.class,
                 CassHelp.class,
-                CfHistograms.class,
-                CfStats.class,
-                CheckTokenMetadata.class,
+                CIDRFilteringStats.class,
                 Cleanup.class,
                 ClearSnapshot.class,
                 ClientStats.class,
@@ -117,6 +118,7 @@ public class NodeTool
                 DisableHintsForDC.class,
                 DisableOldProtocolVersions.class,
                 Drain.class,
+                DropCIDRGroup.class,
                 EnableAuditLog.class,
                 EnableAutoCompaction.class,
                 EnableBackup.class,
@@ -133,6 +135,7 @@ public class NodeTool
                 GetAuditLog.class,
                 GetAuthCacheConfig.class,
                 GetBatchlogReplayTrottle.class,
+                GetCIDRGroupsOfIP.class,
                 GetColumnIndexSize.class,
                 GetCompactionThreshold.class,
                 GetCompactionThroughput.class,
@@ -154,15 +157,18 @@ public class NodeTool
                 GossipInfo.class,
                 Import.class,
                 Info.class,
+                InvalidateCIDRPermissionsCache.class,
                 InvalidateCounterCache.class,
                 InvalidateCredentialsCache.class,
                 InvalidateJmxPermissionsCache.class,
+                ReloadCIDRGroupsCache.class,
                 InvalidateKeyCache.class,
                 InvalidateNetworkPermissionsCache.class,
                 InvalidatePermissionsCache.class,
                 InvalidateRolesCache.class,
                 InvalidateRowCache.class,
                 Join.class,
+                ListCIDRGroups.class,
                 ListPendingHints.class,
                 ListSnapshots.class,
                 Move.class,
@@ -223,10 +229,12 @@ public class NodeTool
                 TopPartitions.class,
                 TpStats.class,
                 TruncateHints.class,
+                UpdateCIDRGroup.class,
                 UpgradeSSTable.class,
                 Verify.class,
                 Version.class,
-                ViewBuildStatus.class
+                ViewBuildStatus.class,
+                ForceCompact.class
         );
 
         Cli.CliBuilder<NodeToolCmdRunnable> builder = Cli.builder("nodetool");
@@ -249,6 +257,15 @@ public class NodeTool
                .withCommand(RepairAdmin.CleanupDataCmd.class)
                .withCommand(RepairAdmin.SummarizePendingCmd.class)
                .withCommand(RepairAdmin.SummarizeRepairedCmd.class);
+
+        builder.withGroup("cms")
+               .withDescription("Manage cluster metadata")
+               .withDefaultCommand(CMSAdmin.DescribeCMS.class)
+               .withCommand(CMSAdmin.DescribeCMS.class)
+               .withCommand(CMSAdmin.InitializeCMS.class)
+               .withCommand(CMSAdmin.ReconfigureCMS.class)
+               .withCommand(CMSAdmin.Snapshot.class)
+               .withCommand(CMSAdmin.Unregister.class);
 
         Cli<NodeToolCmdRunnable> parser = builder.build();
 
@@ -307,6 +324,10 @@ public class NodeTool
 
     protected void err(Throwable e)
     {
+        // CASSANDRA-11537: friendly error message when server is not ready
+        if (e instanceof InstanceNotFoundException)
+            throw new IllegalArgumentException("Server is not initialized yet, cannot run nodetool.");
+
         output.err.println("error: " + e.getMessage());
         output.err.println("-- StackTrace --");
         output.err.println(getStackTraceAsString(e));
@@ -484,6 +505,11 @@ public class NodeTool
         protected String[] parseOptionalTables(List<String> cmdArgs)
         {
             return cmdArgs.size() <= 1 ? EMPTY_STRING_ARRAY : toArray(cmdArgs.subList(1, cmdArgs.size()), String.class);
+        }
+
+        protected String[] parsePartitionKeys(List<String> cmdArgs)
+        {
+            return cmdArgs.size() <= 2 ? EMPTY_STRING_ARRAY : toArray(cmdArgs.subList(2, cmdArgs.size()), String.class);
         }
     }
 

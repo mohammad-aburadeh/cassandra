@@ -41,9 +41,6 @@ public class Info extends NodeToolCmd
     @Option(name = {"-T", "--tokens"}, description = "Display all tokens")
     private boolean tokens = false;
 
-    @Option(name = {"-O", "--out-of-range-ops"}, description = "Display per-keyspace counts of operations for invalid tokens")
-    private boolean outOfRangeOps = false;
-
     @Override
     public void execute(NodeProbe probe)
     {
@@ -54,6 +51,8 @@ public class Info extends NodeToolCmd
         out.printf("%-23s: %s%n", "Gossip active", gossipInitialized);
         out.printf("%-23s: %s%n", "Native Transport active", probe.isNativeTransportRunning());
         out.printf("%-23s: %s%n", "Load", probe.getLoadString());
+        out.printf("%-23s: %s%n", "Uncompressed load", probe.getUncompressedLoadString());
+
         if (gossipInitialized)
             out.printf("%-23s: %s%n", "Generation No", probe.getCurrentGenerationNumber());
         else
@@ -179,19 +178,10 @@ public class Info extends NodeToolCmd
             out.printf("%-23s: (node is not joined to the cluster)%n", "Token");
         }
 
-        // Operations for out of range tokens
-        if (this.outOfRangeOps)
-        {
-            System.out.printf("%-23s: %-48s %10s %10s %10s%n", "Invalid Token Ops", "Keyspace", "Read", "Write", "Paxos");
-
-            Map<String, long[]> outOfRangeOpCounts = probe.getOutOfRangeOpCounts();
-            outOfRangeOpCounts.forEach((ks, counts) -> System.out.printf("%-24s %-48s %10s %10s %10s%n",
-                                                                         "",
-                                                                         ks,
-                                                                         counts[0],
-                                                                         counts[1],
-                                                                         counts[2]));
-        }
+        out.printf("%-23s: %s%n", "Bootstrap state", probe.getStorageService().getBootstrapState());
+        out.printf("%-23s: %s%n", "Bootstrap failed", probe.getStorageService().isBootstrapFailed());
+        out.printf("%-23s: %s%n", "Decommissioning", probe.getStorageService().isDecommissioning());
+        out.printf("%-23s: %s%n", "Decommission failed", probe.getStorageService().isDecommissionFailed());
     }
 
     /**

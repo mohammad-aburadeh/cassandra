@@ -20,7 +20,6 @@ package org.apache.cassandra.io.sstable;
 import java.io.IOException;
 import java.util.UUID;
 
-import org.apache.cassandra.io.util.File;
 import org.apache.commons.lang3.StringUtils;
 import org.junit.Assert;
 import org.junit.BeforeClass;
@@ -29,11 +28,15 @@ import org.junit.Test;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.io.sstable.format.SSTableFormat;
+import org.apache.cassandra.io.sstable.format.SSTableFormat.Components;
+import org.apache.cassandra.io.sstable.format.Version;
+import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.Pair;
 
-import static org.junit.Assert.*;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
 
 public class DescriptorTest
 {
@@ -84,19 +87,19 @@ public class DescriptorTest
 
     private void testFromFilenameFor(File dir)
     {
-        checkFromFilename(new Descriptor(dir, ksname, cfname, new SequenceBasedSSTableId(1), SSTableFormat.Type.BIG));
+        checkFromFilename(new Descriptor(dir, ksname, cfname, new SequenceBasedSSTableId(1), DatabaseDescriptor.getSelectedSSTableFormat()));
 
         // secondary index
         String idxName = "myidx";
         File idxDir = new File(dir.absolutePath() + File.pathSeparator() + Directories.SECONDARY_INDEX_NAME_SEPARATOR + idxName);
-        checkFromFilename(new Descriptor(idxDir, ksname, cfname + Directories.SECONDARY_INDEX_NAME_SEPARATOR + idxName, new SequenceBasedSSTableId(4), SSTableFormat.Type.BIG));
+        checkFromFilename(new Descriptor(idxDir, ksname, cfname + Directories.SECONDARY_INDEX_NAME_SEPARATOR + idxName, new SequenceBasedSSTableId(4), DatabaseDescriptor.getSelectedSSTableFormat()));
     }
 
     private void checkFromFilename(Descriptor original)
     {
-        File file = new File(original.filenameFor(Component.DATA));
+        File file = original.fileFor(Components.DATA);
 
-        Pair<Descriptor, Component> pair = Descriptor.fromFilenameWithComponent(file);
+        Pair<Descriptor, Component> pair = Descriptor.fromFileWithComponent(file);
         Descriptor desc = pair.left;
 
         assertEquals(original.directory, desc.directory);
@@ -104,7 +107,7 @@ public class DescriptorTest
         assertEquals(original.cfname, desc.cfname);
         assertEquals(original.version, desc.version);
         assertEquals(original.id, desc.id);
-        assertEquals(Component.DATA, pair.right);
+        assertEquals(Components.DATA, pair.right);
     }
 
     @Test
@@ -112,8 +115,8 @@ public class DescriptorTest
     {
         // Descriptor should be equal when parent directory points to the same directory
         File dir = new File(".");
-        Descriptor desc1 = new Descriptor(dir, "ks", "cf", new SequenceBasedSSTableId(1), SSTableFormat.Type.BIG);
-        Descriptor desc2 = new Descriptor(dir.toAbsolute(), "ks", "cf", new SequenceBasedSSTableId(1), SSTableFormat.Type.BIG);
+        Descriptor desc1 = new Descriptor(dir, "ks", "cf", new SequenceBasedSSTableId(1), DatabaseDescriptor.getSelectedSSTableFormat());
+        Descriptor desc2 = new Descriptor(dir.toAbsolute(), "ks", "cf", new SequenceBasedSSTableId(1), DatabaseDescriptor.getSelectedSSTableFormat());
         assertEquals(desc1, desc2);
         assertEquals(desc1.hashCode(), desc2.hashCode());
     }
@@ -121,16 +124,16 @@ public class DescriptorTest
     @Test
     public void validateNames()
     {
-        String[] names = {
-             "ma-1-big-Data.db",
-             // 2ndary index
-             ".idx1" + File.pathSeparator() + "ma-1-big-Data.db",
-        };
+        final SSTableFormat<?, ?> ssTableFormat = DatabaseDescriptor.getSelectedSSTableFormat();
+        String name = ssTableFormat.name();
+        final Version version = ssTableFormat.getLatestVersion();
+        String[] fileNames = { version + "-1-" + name + "-Data.db",
+                               // 2ndary index
+                               ".idx1" + File.pathSeparator() + version + "-1-" + name + "-Data.db",
+                               };
 
-        for (String name : names)
-        {
-            assertNotNull(Descriptor.fromFilename(name));
-        }
+        for (String fileName : fileNames)
+            assertNotNull(Descriptor.fromFileWithComponent(new File(fileName), false).left);
     }
 
     @Test
@@ -146,7 +149,7 @@ public class DescriptorTest
         {
             try
             {
-                Descriptor d = Descriptor.fromFilename(name);
+                Descriptor d = Descriptor.fromFile(new File(name));
                 Assert.fail(name);
             } catch (Throwable e) {
                 //good
@@ -160,12 +163,13 @@ public class DescriptorTest
         // from Cassandra dirs
 
         String[] filePaths = new String[]{
-        "/path/to/cassandra/data/dir2/dir5/dir6/ks1/tab1-3424234234324/na-1-big-Index.db",
-        "/path/to/cassandra/data/dir2/dir5/dir6/ks1/tab1-3424234234324/snapshots/snapshot/na-1-big-Index.db",
-        "/path/to/cassandra/data/dir2/dir5/dir6/ks1/tab1-3424234234324/backups/na-1-big-Index.db",
-        "/path/to/cassandra/data/dir2/dir5/dir6/ks1/tab1-3424234234324/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
-        "/path/to/cassandra/data/dir2/dir5/dir6/ks1/tab1-3424234234324/snapshots/snapshot/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
-        "/path/to/cassandra/data/dir2/dir5/dir6/ks1/tab1-3424234234324/backups/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/ks1/tab1-34234234234234234234234234234234/na-1-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/ks1/tab1-34234234234234234234234234234234/nb-1-big-TOC.txt",
+        "/path/to/cassandra/data/dir2/dir5/dir6/ks1/tab1-34234234234234234234234234234234/snapshots/snapshot/na-1-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/ks1/tab1-34234234234234234234234234234234/backups/na-1-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/ks1/tab1-34234234234234234234234234234234/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/ks1/tab1-34234234234234234234234234234234/snapshots/snapshot/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/ks1/tab1-34234234234234234234234234234234/backups/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
         };
 
         testKeyspaceTableParsing(filePaths, "ks1", "tab1");
@@ -173,12 +177,12 @@ public class DescriptorTest
         // indexes
 
         String[] filePathsIndexes = new String[]{
-        "/path/to/cassandra/data/dir2/dir5/dir6/ks1/tab1-3424234234324/.index/na-1-big-Index.db",
-        "/path/to/cassandra/data/dir2/dir5/dir6/ks1/tab1-3424234234324/snapshots/snapshot/.index/na-1-big-Index.db",
-        "/path/to/cassandra/data/dir2/dir5/dir6/ks1/tab1-3424234234324/backups/.index/na-1-big-Index.db",
-        "/path/to/cassandra/data/dir2/dir5/dir6/ks1/tab1-3424234234324/.index/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
-        "/path/to/cassandra/data/dir2/dir5/dir6/ks1/tab1-3424234234324/snapshots/snapshot/.index/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
-        "/path/to/cassandra/data/dir2/dir5/dir6/ks1/tab1-3424234234324/backups/.index/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/ks1/tab1-34234234234234234234234234234234/.index/na-1-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/ks1/tab1-34234234234234234234234234234234/snapshots/snapshot/.index/na-1-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/ks1/tab1-34234234234234234234234234234234/backups/.index/na-1-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/ks1/tab1-34234234234234234234234234234234/.index/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/ks1/tab1-34234234234234234234234234234234/snapshots/snapshot/.index/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/ks1/tab1-34234234234234234234234234234234/backups/.index/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
         };
 
         testKeyspaceTableParsing(filePathsIndexes, "ks1", "tab1.index");
@@ -186,23 +190,23 @@ public class DescriptorTest
         // what if even a snapshot of a keyspace and table called snapshots is called snapshots?
 
         String[] filePathsWithSnapshotKeyspaceAndTable = new String[]{
-        "/path/to/cassandra/data/dir2/dir5/dir6/snapshots/snapshots-742738427389478/na-1-big-Index.db",
-        "/path/to/cassandra/data/dir2/dir5/dir6/snapshots/snapshots-742738427389478/snapshots/snapshots/na-1-big-Index.db",
-        "/path/to/cassandra/data/dir2/dir5/dir6/snapshots/snapshots-742738427389478/backups/na-1-big-Index.db",
-        "/path/to/cassandra/data/dir2/dir5/dir6/snapshots/snapshots-742738427389478/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
-        "/path/to/cassandra/data/dir2/dir5/dir6/snapshots/snapshots-742738427389478/snapshots/snapshots/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
-        "/path/to/cassandra/data/dir2/dir5/dir6/snapshots/snapshots-742738427389478/backups/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/snapshots/snapshots-74273842738947874273842738947878/na-1-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/snapshots/snapshots-74273842738947874273842738947878/snapshots/snapshots/na-1-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/snapshots/snapshots-74273842738947874273842738947878/backups/na-1-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/snapshots/snapshots-74273842738947874273842738947878/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/snapshots/snapshots-74273842738947874273842738947878/snapshots/snapshots/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/snapshots/snapshots-74273842738947874273842738947878/backups/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
         };
 
         testKeyspaceTableParsing(filePathsWithSnapshotKeyspaceAndTable, "snapshots", "snapshots");
 
         String[] filePathsWithSnapshotKeyspaceAndTableWithIndices = new String[]{
-        "/path/to/cassandra/data/dir2/dir5/dir6/snapshots/snapshots-742738427389478/.index/na-1-big-Index.db",
-        "/path/to/cassandra/data/dir2/dir5/dir6/snapshots/snapshots-742738427389478/snapshots/snapshots/.index/na-1-big-Index.db",
-        "/path/to/cassandra/data/dir2/dir5/dir6/snapshots/snapshots-742738427389478/backups/.index/na-1-big-Index.db",
-        "/path/to/cassandra/data/dir2/dir5/dir6/snapshots/snapshots-742738427389478/.index/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
-        "/path/to/cassandra/data/dir2/dir5/dir6/snapshots/snapshots-742738427389478/snapshots/snapshots/.index/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
-        "/path/to/cassandra/data/dir2/dir5/dir6/snapshots/snapshots-742738427389478/backups/.index/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/snapshots/snapshots-74273842738947874273842738947878/.index/na-1-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/snapshots/snapshots-74273842738947874273842738947878/snapshots/snapshots/.index/na-1-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/snapshots/snapshots-74273842738947874273842738947878/backups/.index/na-1-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/snapshots/snapshots-74273842738947874273842738947878/.index/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/snapshots/snapshots-74273842738947874273842738947878/snapshots/snapshots/.index/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/snapshots/snapshots-74273842738947874273842738947878/backups/.index/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
         };
 
         testKeyspaceTableParsing(filePathsWithSnapshotKeyspaceAndTableWithIndices, "snapshots", "snapshots.index");
@@ -210,12 +214,12 @@ public class DescriptorTest
         // what if keyspace and table is called backups?
 
         String[] filePathsWithBackupsKeyspaceAndTable = new String[]{
-        "/path/to/cassandra/data/dir2/dir5/dir6/backups/backups-742738427389478/na-1-big-Index.db",
-        "/path/to/cassandra/data/dir2/dir5/dir6/backups/backups-742738427389478/snapshots/snapshots/na-1-big-Index.db",
-        "/path/to/cassandra/data/dir2/dir5/dir6/backups/backups-742738427389478/backups/na-1-big-Index.db",
-        "/path/to/cassandra/data/dir2/dir5/dir6/backups/backups-742738427389478/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
-        "/path/to/cassandra/data/dir2/dir5/dir6/backups/backups-742738427389478/snapshots/snapshots/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
-        "/path/to/cassandra/data/dir2/dir5/dir6/backups/backups-742738427389478/backups/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/backups/backups-74273842738947874273842738947878/na-1-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/backups/backups-74273842738947874273842738947878/snapshots/snapshots/na-1-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/backups/backups-74273842738947874273842738947878/backups/na-1-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/backups/backups-74273842738947874273842738947878/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/backups/backups-74273842738947874273842738947878/snapshots/snapshots/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/backups/backups-74273842738947874273842738947878/backups/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
         };
 
         testKeyspaceTableParsing(filePathsWithBackupsKeyspaceAndTable, "backups", "backups");
@@ -224,11 +228,12 @@ public class DescriptorTest
 
         String[] legacyFilePathsWithBackupsKeyspaceAndTable = new String[]{
         "/path/to/cassandra/data/dir2/dir5/dir6/backups/backups/na-1-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/backups/backups/nb-1-big-TOC.txt",
         //"/path/to/cassandra/data/dir2/dir5/dir6/backups/backups/snapshots/snapshots/na-1-big-Index.db", #not supported (CASSANDRA-14013)
         "/path/to/cassandra/data/dir2/dir5/dir6/backups/backups/backups/na-1-big-Index.db",
-        "/path/to/cassandra/data/dir2/dir5/dir6/backups/backups/nb-22-big-Index.db",
-        //"/path/to/cassandra/data/dir2/dir5/dir6/backups/backups/snapshots/snapshots/nb-22-big-Index.db", #not supported (CASSANDRA-14013)
-        "/path/to/cassandra/data/dir2/dir5/dir6/backups/backups/backups/nb-22-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/backups/backups/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
+        //"/path/to/cassandra/data/dir2/dir5/dir6/backups/backups/snapshots/snapshots/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db", #not supported (CASSANDRA-14013)
+        "/path/to/cassandra/data/dir2/dir5/dir6/backups/backups/backups/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
         };
 
         testKeyspaceTableParsing(legacyFilePathsWithBackupsKeyspaceAndTable, "backups", "backups");
@@ -236,12 +241,12 @@ public class DescriptorTest
         // what if even a snapshot of a keyspace and table called backups is called snapshots?
 
         String[] filePathsWithBackupsKeyspaceAndTableWithIndices = new String[]{
-        "/path/to/cassandra/data/dir2/dir5/dir6/backups/backups-742738427389478/.index/na-1-big-Index.db",
-        "/path/to/cassandra/data/dir2/dir5/dir6/backups/backups-742738427389478/snapshots/snapshots/.index/na-1-big-Index.db",
-        "/path/to/cassandra/data/dir2/dir5/dir6/backups/backups-742738427389478/backups/.index/na-1-big-Index.db",
-        "/path/to/cassandra/data/dir2/dir5/dir6/backups/backups-742738427389478/.index/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
-        "/path/to/cassandra/data/dir2/dir5/dir6/backups/backups-742738427389478/snapshots/snapshots/.index/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
-        "/path/to/cassandra/data/dir2/dir5/dir6/backups/backups-742738427389478/backups/.index/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/backups/backups-74273842738947874273842738947878/.index/na-1-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/backups/backups-74273842738947874273842738947878/snapshots/snapshots/.index/na-1-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/backups/backups-74273842738947874273842738947878/backups/.index/na-1-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/backups/backups-74273842738947874273842738947878/.index/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/backups/backups-74273842738947874273842738947878/snapshots/snapshots/.index/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
+        "/path/to/cassandra/data/dir2/dir5/dir6/backups/backups-74273842738947874273842738947878/backups/.index/nb-3g1m_0nuf_3vj5m2k1125165rxa7-big-Index.db",
         };
 
         testKeyspaceTableParsing(filePathsWithBackupsKeyspaceAndTableWithIndices, "backups", "backups.index");
@@ -299,10 +304,10 @@ public class DescriptorTest
     {
         for (String filePath : filePaths)
         {
-            Descriptor descriptor = Descriptor.fromFilename(filePath);
+            Descriptor descriptor = Descriptor.fromFile(new File(filePath));
             Assert.assertNotNull(descriptor);
-            Assert.assertEquals(expectedKeyspace, descriptor.ksname);
-            Assert.assertEquals(expectedTable, descriptor.cfname);
+            Assert.assertEquals(String.format("Expected keyspace not found for %s", filePath), expectedKeyspace, descriptor.ksname);
+            Assert.assertEquals(String.format("Expected table not found for %s", filePath), expectedTable, descriptor.cfname);
         }
     }
 }

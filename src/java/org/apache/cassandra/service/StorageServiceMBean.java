@@ -44,8 +44,9 @@ public interface StorageServiceMBean extends NotificationEmitter
      * determined by the failure detector of the node being queried.
      *
      * @return set of IP addresses, as Strings
+     * @deprecated See CASSANDRA-7544
      */
-    @Deprecated public List<String> getLiveNodes();
+    @Deprecated(since = "4.0") public List<String> getLiveNodes();
     public List<String> getLiveNodesWithPort();
 
     /**
@@ -53,32 +54,36 @@ public interface StorageServiceMBean extends NotificationEmitter
      * by this node's failure detector.
      *
      * @return set of IP addresses, as Strings
+     * @deprecated See CASSANDRA-7544
      */
-    @Deprecated public List<String> getUnreachableNodes();
+    @Deprecated(since = "4.0") public List<String> getUnreachableNodes();
     public List<String> getUnreachableNodesWithPort();
 
     /**
      * Retrieve the list of nodes currently bootstrapping into the ring.
      *
      * @return set of IP addresses, as Strings
+     * @deprecated See CASSANDRA-7544
      */
-    @Deprecated public List<String> getJoiningNodes();
+    @Deprecated(since = "4.0") public List<String> getJoiningNodes();
     public List<String> getJoiningNodesWithPort();
 
     /**
      * Retrieve the list of nodes currently leaving the ring.
      *
      * @return set of IP addresses, as Strings
+     * @deprecated See CASSANDRA-7544
      */
-    @Deprecated public List<String> getLeavingNodes();
+    @Deprecated(since = "4.0") public List<String> getLeavingNodes();
     public List<String> getLeavingNodesWithPort();
 
     /**
      * Retrieve the list of nodes currently moving in the ring.
      *
      * @return set of IP addresses, as Strings
+     * @deprecated See CASSANDRA-7544
      */
-    @Deprecated public List<String> getMovingNodes();
+    @Deprecated(since = "4.0") public List<String> getMovingNodes();
     public List<String> getMovingNodesWithPort();
 
     /**
@@ -101,6 +106,12 @@ public interface StorageServiceMBean extends NotificationEmitter
      * @return A string representation of the Cassandra version.
      */
     public String getReleaseVersion();
+
+    /**
+     * Fetch a string representation of the Cassandra git SHA.
+     * @return A string representation of the Cassandra git SHA.
+     */
+    public String getGitSHA();
 
     /**
      * Fetch a string representation of the current Schema version.
@@ -151,8 +162,9 @@ public interface StorageServiceMBean extends NotificationEmitter
      * of a Cassandra cluster.
      *
      * @return mapping of ranges to end points
+     * @deprecated See CASSANDRA-7544
      */
-    @Deprecated public Map<List<String>, List<String>> getRangeToEndpointMap(String keyspace);
+    @Deprecated(since = "4.0") public Map<List<String>, List<String>> getRangeToEndpointMap(String keyspace);
     public Map<List<String>, List<String>> getRangeToEndpointWithPortMap(String keyspace);
 
     /**
@@ -160,8 +172,9 @@ public interface StorageServiceMBean extends NotificationEmitter
      * of a Cassandra cluster.
      *
      * @return mapping of ranges to rpc addresses
+     * @deprecated See CASSANDRA-7544
      */
-    @Deprecated public Map<List<String>, List<String>> getRangeToRpcaddressMap(String keyspace);
+    @Deprecated(since = "4.0") public Map<List<String>, List<String>> getRangeToRpcaddressMap(String keyspace);
     public Map<List<String>, List<String>> getRangeToNativeaddressWithPortMap(String keyspace);
 
     /**
@@ -170,16 +183,18 @@ public interface StorageServiceMBean extends NotificationEmitter
      * @param keyspace The keyspace to fetch information about
      *
      * @return a List of TokenRange(s) converted to String for the given keyspace
+     *  @deprecated See CASSANDRA-7544
      */
-    @Deprecated public List <String> describeRingJMX(String keyspace) throws IOException;
+    @Deprecated(since = "4.0") public List <String> describeRingJMX(String keyspace) throws IOException;
     public List<String> describeRingWithPortJMX(String keyspace) throws IOException;
 
     /**
      * Retrieve a map of pending ranges to endpoints that describe the ring topology
      * @param keyspace the keyspace to get the pending range map for.
      * @return a map of pending ranges to endpoints
+     * @deprecated See CASSANDRA-7544
      */
-    @Deprecated public Map<List<String>, List<String>> getPendingRangeToEndpointMap(String keyspace);
+    @Deprecated(since = "4.0") public Map<List<String>, List<String>> getPendingRangeToEndpointMap(String keyspace);
     public Map<List<String>, List<String>> getPendingRangeToEndpointWithPortMap(String keyspace);
 
     /**
@@ -187,30 +202,39 @@ public interface StorageServiceMBean extends NotificationEmitter
      * ones.
      *
      * @return a map of tokens to endpoints in ascending order
+     * @deprecated See CASSANDRA-7544
      */
-    @Deprecated public Map<String, String> getTokenToEndpointMap();
+    @Deprecated(since = "4.0") public Map<String, String> getTokenToEndpointMap();
     public Map<String, String> getTokenToEndpointWithPortMap();
 
     /** Retrieve this hosts unique ID */
     public String getLocalHostId();
 
-    /** {@link StorageServiceMBean#getEndpointToHostId} */
-    @Deprecated
-    public Map<String, String> getHostIdMap();
-
-    /** Retrieve the mapping of endpoint to host ID */
-    @Deprecated public Map<String, String> getEndpointToHostId();
+    /**
+     * Retrieve the mapping of endpoint to host ID.
+     * @deprecated See CASSANDRA-7544
+     */
+    @Deprecated(since = "4.0") public Map<String, String> getEndpointToHostId();
     public Map<String, String> getEndpointWithPortToHostId();
 
-    /** Retrieve the mapping of host ID to endpoint */
-    @Deprecated public Map<String, String> getHostIdToEndpoint();
+    /**
+     * Retrieve the mapping of host ID to endpoint.
+     * @deprecated See CASSANDRA-7544
+     */
+    @Deprecated(since = "4.0") public Map<String, String> getHostIdToEndpoint();
     public Map<String, String> getHostIdToEndpointWithPort();
 
     /** Human-readable load value */
     public String getLoadString();
 
-    /** Human-readable load value.  Keys are IP addresses. */
-    @Deprecated public Map<String, String> getLoadMap();
+    /** Human-readable uncompressed load value */
+    public String getUncompressedLoadString();
+
+    /**
+     * Human-readable load value.  Keys are IP addresses.
+     * @deprecated See CASSANDRA-7544
+     */
+    @Deprecated(since = "4.0") public Map<String, String> getLoadMap();
     public Map<String, String> getLoadMapWithPort();
 
     /**
@@ -228,28 +252,30 @@ public interface StorageServiceMBean extends NotificationEmitter
      * @param cf Column family name
      * @param key - key for which we need to find the endpoint return value -
      * the endpoint responsible for this key
+     * @deprecated See CASSANDRA-7544
      */
-    @Deprecated public List<InetAddress> getNaturalEndpoints(String keyspaceName, String cf, String key);
+    @Deprecated(since = "4.0") public List<InetAddress> getNaturalEndpoints(String keyspaceName, String cf, String key);
     public List<String> getNaturalEndpointsWithPort(String keyspaceName, String cf, String key);
-    @Deprecated public List<InetAddress> getNaturalEndpoints(String keyspaceName, ByteBuffer key);
+    /** @deprecated See CASSANDRA-7544 */
+    @Deprecated(since = "4.0") public List<InetAddress> getNaturalEndpoints(String keyspaceName, ByteBuffer key);
     public List<String> getNaturalEndpointsWithPort(String keysapceName, ByteBuffer key);
 
     /**
-     * @deprecated use {@link #takeSnapshot(String tag, Map options, String... entities)} instead.
+     * @deprecated use {@link #takeSnapshot(String tag, Map options, String... entities)} instead. See CASSANDRA-10907
      */
-    @Deprecated
+    @Deprecated(since = "3.4")
     public void takeSnapshot(String tag, String... keyspaceNames) throws IOException;
 
     /**
-     * @deprecated use {@link #takeSnapshot(String tag, Map options, String... entities)} instead.
+     * @deprecated use {@link #takeSnapshot(String tag, Map options, String... entities)} instead. See CASSANDRA-10907
      */
-    @Deprecated
+    @Deprecated(since = "3.4")
     public void takeTableSnapshot(String keyspaceName, String tableName, String tag) throws IOException;
 
     /**
-     * @deprecated use {@link #takeSnapshot(String tag, Map options, String... entities)} instead.
+     * @deprecated use {@link #takeSnapshot(String tag, Map options, String... entities)} instead. See CASSANDRA-10907
      */
-    @Deprecated
+    @Deprecated(since = "3.4")
     public void takeMultipleTableSnapshot(String tag, String... tableList) throws IOException;
 
     /**
@@ -267,14 +293,30 @@ public interface StorageServiceMBean extends NotificationEmitter
     /**
      * Remove the snapshot with the given name from the given keyspaces.
      * If no tag is specified we will remove all snapshots.
+     *
+     * @param tag name of snapshot to clear, if null or empty string, all snapshots of given keyspace will be cleared
+     * @param keyspaceNames name of keyspaces to clear snapshots for
+     * @deprecated See CASSANDRA-16860
      */
+    @Deprecated(since = "5.0")
     public void clearSnapshot(String tag, String... keyspaceNames) throws IOException;
+
+    /**
+     * Remove the snapshot with the given name from the given keyspaces.
+     * If no tag is specified we will remove all snapshots.
+     *
+     * @param options map of options for cleanup operation, consult nodetool's ClearSnapshot
+     * @param tag name of snapshot to clear, if null or empty string, all snapshots of given keyspace will be cleared
+     * @param keyspaceNames name of keyspaces to clear snapshots for
+     */
+    public void clearSnapshot(Map<String, Object> options, String tag, String... keyspaceNames) throws IOException;
 
     /**
      * Get the details of all the snapshot
      * @return A map of snapshotName to all its details in Tabular form.
+     * @deprecated See CASSANDRA-16789
      */
-    @Deprecated
+    @Deprecated(since = "4.1")
     public Map<String, TabularData> getSnapshotDetails();
 
     /**
@@ -322,7 +364,8 @@ public interface StorageServiceMBean extends NotificationEmitter
      */
     public void forceKeyspaceCompaction(boolean splitOutput, String keyspaceName, String... tableNames) throws IOException, ExecutionException, InterruptedException;
 
-    @Deprecated
+    /** @deprecated See CASSANDRA-11179 */
+    @Deprecated(since = "3.5")
     public int relocateSSTables(String keyspace, String ... cfnames) throws IOException, ExecutionException, InterruptedException;
     public int relocateSSTables(int jobs, String keyspace, String ... cfnames) throws IOException, ExecutionException, InterruptedException;
 
@@ -342,9 +385,17 @@ public interface StorageServiceMBean extends NotificationEmitter
     public void forceKeyspaceCompactionForPartitionKey(String keyspaceName, String partitionKey, String... tableNames) throws IOException, ExecutionException, InterruptedException;
 
     /**
-     * Trigger a cleanup of keys on a single keyspace
+     * Forces compaction for a list of partition keys on a table.
+     * The method will ignore the gc_grace_seconds for the partitionKeysIgnoreGcGrace during the comapction,
+     * in order to purge the tombstones and free up space quicker.
      */
-    @Deprecated
+    public void forceCompactionKeysIgnoringGcGrace(String keyspaceName, String tableName, String... partitionKeysIgnoreGcGrace) throws IOException, ExecutionException, InterruptedException;
+
+    /**
+     * Trigger a cleanup of keys on a single keyspace
+     * @deprecated See CASSANDRA-11179
+     */
+    @Deprecated(since = "3.5")
     public int forceKeyspaceCleanup(String keyspaceName, String... tables) throws IOException, ExecutionException, InterruptedException;
     public int forceKeyspaceCleanup(int jobs, String keyspaceName, String... tables) throws IOException, ExecutionException, InterruptedException;
 
@@ -353,13 +404,20 @@ public interface StorageServiceMBean extends NotificationEmitter
      * If tableNames array is empty, all CFs are scrubbed.
      *
      * Scrubbed CFs will be snapshotted first, if disableSnapshot is false
+     * @deprecated See CASSANDRA-11179
      */
-    @Deprecated
-    public int scrub(boolean disableSnapshot, boolean skipCorrupted, String keyspaceName, String... tableNames) throws IOException, ExecutionException, InterruptedException;
-    @Deprecated
-    public int scrub(boolean disableSnapshot, boolean skipCorrupted, boolean checkData, String keyspaceName, String... tableNames) throws IOException, ExecutionException, InterruptedException;
-    @Deprecated
-    public int scrub(boolean disableSnapshot, boolean skipCorrupted, boolean checkData, int jobs, String keyspaceName, String... columnFamilies) throws IOException, ExecutionException, InterruptedException;
+    @Deprecated(since = "3.5")
+    default int scrub(boolean disableSnapshot, boolean skipCorrupted, boolean checkData, String keyspaceName, String... tableNames) throws IOException, ExecutionException, InterruptedException
+    {
+        return scrub(disableSnapshot, skipCorrupted, checkData, 0, keyspaceName, tableNames);
+    }
+
+    /** @deprecated See CASSANDRA-14092 */
+    @Deprecated(since = "3.11")
+    default int scrub(boolean disableSnapshot, boolean skipCorrupted, boolean checkData, int jobs, String keyspaceName, String... columnFamilies) throws IOException, ExecutionException, InterruptedException
+    {
+        return scrub(disableSnapshot, skipCorrupted, checkData, false, jobs, keyspaceName, columnFamilies);
+    }
 
     public int scrub(boolean disableSnapshot, boolean skipCorrupted, boolean checkData, boolean reinsertOverflowedTTL, int jobs, String keyspaceName, String... columnFamilies) throws IOException, ExecutionException, InterruptedException;
 
@@ -375,10 +433,12 @@ public interface StorageServiceMBean extends NotificationEmitter
     /**
      * Rewrite all sstables to the latest version.
      * Unlike scrub, it doesn't skip bad rows and do not snapshot sstables first.
+     * @deprecated See CASSANDRA-11179
      */
-    @Deprecated
+    @Deprecated(since = "3.5")
     public int upgradeSSTables(String keyspaceName, boolean excludeCurrentVersion, String... tableNames) throws IOException, ExecutionException, InterruptedException;
-    @Deprecated
+    /** @deprecated See CASSANDRA-16837 */
+    @Deprecated(since = "4.1")
     default int upgradeSSTables(String keyspaceName, boolean excludeCurrentVersion, int jobs, String... tableNames) throws IOException, ExecutionException, InterruptedException
     {
         return upgradeSSTables(keyspaceName, excludeCurrentVersion, Long.MAX_VALUE, jobs, tableNames);
@@ -417,14 +477,26 @@ public interface StorageServiceMBean extends NotificationEmitter
 
     public void forceTerminateAllRepairSessions();
 
+    /**
+     * @deprecated use setRepairSessionMaximumTreeDepth instead as it will not throw non-standard exceptions. See CASSANDRA-17668
+     */
+    @Deprecated(since = "5.0")
     public void setRepairSessionMaxTreeDepth(int depth);
 
+    /**
+     * @deprecated use getRepairSessionMaximumTreeDepth instead. See CASSANDRA-17668
+     */
+    @Deprecated(since = "5.0")
     public int getRepairSessionMaxTreeDepth();
+
+    public void setRepairSessionMaximumTreeDepth(int depth);
+
+    public int getRepairSessionMaximumTreeDepth();
 
     /**
      * Get the status of a given parent repair session.
      * @param cmd the int reference returned when issuing the repair
-     * @return status of parent repair from enum {@link org.apache.cassandra.repair.RepairRunnable.Status}
+     * @return status of parent repair from enum {@link ActiveRepairService.ParentRepairStatus}
      * followed by final message or messages of the session
      */
     @Nullable
@@ -437,21 +509,44 @@ public interface StorageServiceMBean extends NotificationEmitter
     public void decommission(boolean force) throws InterruptedException;
 
     /**
+     * Returns whether a node has failed to decommission.
+     *
+     * The fact that this method returns false does not mean that there was an attempt to
+     * decommission this node which was successful.
+     *
+     * @return true if decommission of this node has failed, false otherwise
+     */
+    public boolean isDecommissionFailed();
+
+    /**
+     * Returns whether a node is being decommissioned or not.
+     *
+     * @return true if this node is decommissioning, false otherwise
+     */
+    public boolean isDecommissioning();
+
+    /**
      * @param newToken token to move this node to.
      * This node will unload its data onto its neighbors, and bootstrap to the new token.
      */
     public void move(String newToken) throws IOException;
+    public void resumeMove();
+    public void abortMove();
 
     /**
      * removeToken removes token (and all data associated with
      * enpoint that had it) from the ring
      */
     public void removeNode(String token);
+    public void removeNode(String token, boolean force);
+
+    public void assassinateEndpoint(String addr);
 
     /**
      * Get the status of a token removal.
+     * @deprecated See CASSANDRA-7544
      */
-    @Deprecated public String getRemovalStatus();
+    @Deprecated(since = "4.0") public String getRemovalStatus();
     public String getRemovalStatusWithPort();
 
     /**
@@ -506,8 +601,9 @@ public interface StorageServiceMBean extends NotificationEmitter
     /**
      * given a list of tokens (representing the nodes in the cluster), returns
      *   a mapping from {@code "token -> %age of cluster owned by that token"}
+     * @deprecated See CASSANDRA-7544
      */
-    @Deprecated public Map<InetAddress, Float> getOwnership();
+    @Deprecated(since = "4.0") public Map<InetAddress, Float> getOwnership();
     public Map<String, Float> getOwnershipWithPort();
 
     /**
@@ -516,8 +612,9 @@ public interface StorageServiceMBean extends NotificationEmitter
      * If Keyspace == null, this method will try to verify if all the keyspaces
      * in the cluster have the same replication strategies and if yes then we will
      * use the first else a empty Map is returned.
+     * @deprecated See CASSANDRA-7544
      */
-    @Deprecated public Map<InetAddress, Float> effectiveOwnership(String keyspace) throws IllegalStateException;
+    @Deprecated(since = "4.0") public Map<InetAddress, Float> effectiveOwnership(String keyspace) throws IllegalStateException;
     public Map<String, Float> effectiveOwnershipWithPort(String keyspace) throws IllegalStateException;
 
     public List<String> getKeyspaces();
@@ -526,7 +623,8 @@ public interface StorageServiceMBean extends NotificationEmitter
 
     public List<String> getNonLocalStrategyKeyspaces();
 
-    @Deprecated public Map<String, String> getViewBuildStatuses(String keyspace, String view);
+    /** @deprecated See CASSANDRA-7544 */
+    @Deprecated(since = "4.0") public Map<String, String> getViewBuildStatuses(String keyspace, String view);
     public Map<String, String> getViewBuildStatusesWithPort(String keyspace, String view);
 
     /**
@@ -579,7 +677,8 @@ public interface StorageServiceMBean extends NotificationEmitter
     // to determine if initialization has completed
     public boolean isInitialized();
 
-    public void stopNativeTransport();
+    @Deprecated(since = "5.0") public default void stopNativeTransport() { stopNativeTransport(false); }
+    public void stopNativeTransport(boolean force);
     public void startNativeTransport();
     public boolean isNativeTransportRunning();
     public void enableNativeTransportOldProtocolVersions();
@@ -606,6 +705,16 @@ public interface StorageServiceMBean extends NotificationEmitter
      * @return True prior to bootstrap streaming completing. False prior to start of bootstrap and post streaming.
      */
     public boolean isBootstrapMode();
+
+    /**
+     * Returns whether a node has failed to bootstrap.
+     *
+     * The fact that this method returns false does not mean that there was an attempt to
+     * bootstrap this node which was successful.
+     *
+     * @return true if bootstrap of this node has failed, false otherwise
+     */
+    public boolean isBootstrapFailed();
 
     public void setRpcTimeout(long value);
     public long getRpcTimeout();
@@ -640,20 +749,21 @@ public interface StorageServiceMBean extends NotificationEmitter
     public void setStreamThroughputMbitPerSec(int value);
     /**
      * @return stream_throughput_outbound in megabits
-     * @deprecated Use getStreamThroughputMbitPerSecAsDouble instead as this one will provide a rounded value
+     * @deprecated Use getStreamThroughputMbitPerSecAsDouble instead as this one will provide a rounded value. See CASSANDRA-17225
      */
-    @Deprecated
+    @Deprecated(since = "4.1")
     public int getStreamThroughputMbitPerSec();
     public double getStreamThroughputMbitPerSecAsDouble();
 
-    @Deprecated
+    /** @deprecated See CASSANDRA-15234 */
+    @Deprecated(since = "4.1")
     public void setStreamThroughputMbPerSec(int value);
 
     /**
      * @return stream_throughput_outbound in MiB
-     * @deprecated Use getStreamThroughputMebibytesPerSecAsDouble instead as this one will provide a rounded value
+     * @deprecated Use getStreamThroughputMebibytesPerSecAsDouble instead as this one will provide a rounded value. See CASSANDRA-15234
      */
-    @Deprecated
+    @Deprecated(since = "4.1")
     public int getStreamThroughputMbPerSec();
     public void setStreamThroughputMebibytesPerSec(int value);
     /**
@@ -667,20 +777,21 @@ public interface StorageServiceMBean extends NotificationEmitter
 
     /**
      * @return inter_dc_stream_throughput_outbound in megabits
-     * @deprecated Use getInterDCStreamThroughputMbitPerSecAsDouble instead as this one will provide a rounded value
+     * @deprecated Use getInterDCStreamThroughputMbitPerSecAsDouble instead as this one will provide a rounded value. See CASSANDRA-17225
      */
-    @Deprecated
+    @Deprecated(since = "4.1")
     public int getInterDCStreamThroughputMbitPerSec();
     public double getInterDCStreamThroughputMbitPerSecAsDouble();
 
-    @Deprecated
+    /** @deprecated See CASSANDRA-15234 */
+    @Deprecated(since = "4.1")
     public void setInterDCStreamThroughputMbPerSec(int value);
 
     /**
      * @return inter_dc_stream_throughput_outbound in MiB
-     * @deprecated Use getInterDCStreamThroughputMebibytesPerSecAsDouble instead as this one will provide a rounded value
+     * @deprecated Use getInterDCStreamThroughputMebibytesPerSecAsDouble instead as this one will provide a rounded value. See CASSANDRA-15234
      */
-    @Deprecated
+    @Deprecated(since = "4.1")
     public int getInterDCStreamThroughputMbPerSec();
     public void setInterDCStreamThroughputMebibytesPerSec(int value);
     /**
@@ -700,11 +811,12 @@ public interface StorageServiceMBean extends NotificationEmitter
     public long getCompactionThroughtputBytesPerSec();
     /**
      * @return  compaction_throughgput in MiB
-     * @deprecated Use getCompactionThroughtputMibPerSecAsDouble instead as this one will provide a rounded value
+     * @deprecated Use getCompactionThroughtputMibPerSecAsDouble instead as this one will provide a rounded value. See CASSANDRA-17225
      */
-    @Deprecated
+    @Deprecated(since = "4.1")
     public int getCompactionThroughputMbPerSec();
     public void setCompactionThroughputMbPerSec(int value);
+    Map<String, String> getCurrentCompactionThroughputMebibytesPerSec();
 
     public int getBatchlogReplayThrottleInKB();
     public void setBatchlogReplayThrottleInKB(int value);
@@ -715,6 +827,9 @@ public interface StorageServiceMBean extends NotificationEmitter
     public void bypassConcurrentValidatorsLimit();
     public void enforceConcurrentValidatorsLimit();
     public boolean isConcurrentValidatorsLimitEnforced();
+
+    int getConcurrentIndexBuilders();
+    void setConcurrentIndexBuilders(int value);
 
     public int getConcurrentValidators();
     public void setConcurrentValidators(int value);
@@ -747,8 +862,22 @@ public interface StorageServiceMBean extends NotificationEmitter
      * @param keyspace Name of the keyspace which to rebuild or null to rebuild all keyspaces.
      * @param tokens Range of tokens to rebuild or null to rebuild all token ranges. In the format of:
      *               "(start_token_1,end_token_1],(start_token_2,end_token_2],...(start_token_n,end_token_n]"
+     * @param specificSources list of sources that can be used for rebuilding. Must be other nodes in the cluster.
+     *                        The format of the string is comma separated values.
      */
     public void rebuild(String sourceDc, String keyspace, String tokens, String specificSources);
+
+    /**
+    * Same as {@link #rebuild(String)}, but only for specified keyspace and ranges. It excludes local data center nodes
+    *
+    * @param sourceDc Name of DC from which to select sources for streaming or null to pick any node
+    * @param keyspace Name of the keyspace which to rebuild or null to rebuild all keyspaces.
+    * @param tokens Range of tokens to rebuild or null to rebuild all token ranges. In the format of:
+    *               "(start_token_1,end_token_1],(start_token_2,end_token_2],...(start_token_n,end_token_n]"
+    * @param specificSources list of sources that can be used for rebuilding. Mostly other nodes in the cluster.
+    * @param excludeLocalDatacenterNodes Flag to indicate whether local data center nodes should be excluded as sources for streaming.
+    */
+    public void rebuild(String sourceDc, String keyspace, String tokens, String specificSources, boolean excludeLocalDatacenterNodes);
 
     /** Starts a bulk load and blocks until it completes. */
     public void bulkLoad(String directory);
@@ -768,8 +897,9 @@ public interface StorageServiceMBean extends NotificationEmitter
      * @param tableName The ColumnFamily name where SSTables belong
      *
      * @see ColumnFamilyStoreMBean#loadNewSSTables()
+     * @deprecated See CASSANDRA-14417
      */
-    @Deprecated
+    @Deprecated(since = "4.0")
     public void loadNewSSTables(String ksName, String tableName);
 
     /**
@@ -801,6 +931,36 @@ public interface StorageServiceMBean extends NotificationEmitter
     public void setTraceProbability(double probability);
 
     public Map<String, List<CompositeData>> samplePartitions(int duration, int capacity, int count, List<String> samplers) throws OpenDataException;
+
+    public Map<String, List<CompositeData>> samplePartitions(String keyspace, int duration, int capacity, int count, List<String> samplers) throws OpenDataException;
+
+    /**
+     * Start a scheduled sampling
+     * @param ks Keyspace. Nullable. If null, the scheduled sampling is on all keyspaces and tables
+     * @param table Nullable. If null, the scheduled sampling is on all tables of the specified keyspace
+     * @param duration Duration of each scheduled sampling job in milliseconds
+     * @param interval Interval of each scheduled sampling job in milliseconds
+     * @param capacity Capacity of the sampler, higher for more accuracy
+     * @param count Number of the top samples to list
+     * @param samplers a list of samplers to enable
+     * @return true if the scheduled sampling is started successfully. Otherwise return false
+     */
+    public boolean startSamplingPartitions(String ks, String table, int duration, int interval, int capacity, int count, List<String> samplers) throws OpenDataException;
+
+    /**
+     * Stop a scheduled sampling
+     * @param ks Keyspace. Nullable. If null, the scheduled sampling is on all keysapces and tables
+     * @param table Nullable. If null, the scheduled sampling is on all tables of the specified keyspace
+     * @return true if the scheduled sampling is stopped. False is returned if the sampling task is not found
+     */
+    public boolean stopSamplingPartitions(String ks, String table) throws OpenDataException;
+
+    /**
+     * @return a list of qualified table names that have active scheduled sampling tasks. The format of the name is `KEYSPACE.TABLE`
+     * The wild card symbol (*) indicates all keyspace/table. For example, "*.*" indicates all tables in all keyspaces. "foo.*" indicates
+     * all tables under keyspace 'foo'. "foo.bar" indicates the scheduled sampling is enabled for the table 'bar'
+     */
+    public List<String> getSampleTasks();
 
     /**
      * Returns the configured tracing probability.
@@ -840,32 +1000,73 @@ public interface StorageServiceMBean extends NotificationEmitter
     /** Sets the number of rows cached at the coordinator before filtering/index queries fail outright. */
     public void setCachedReplicaRowsFailThreshold(int threshold);
 
-    /** Returns the granularity of the collation index of rows within a partition **/
+    /**
+     * Returns the granularity of the collation index of rows within a partition.
+     * -1 stands for the SSTable format's default.
+     **/
     public int getColumnIndexSizeInKiB();
-    /** Sets the granularity of the collation index of rows within a partition **/
+
+    /**
+     * Sets the granularity of the collation index of rows within a partition.
+     * Use -1 to select the SSTable format's default.
+     **/
+    public void setColumnIndexSizeInKiB(int columnIndexSizeInKiB);
+
+    /**
+     * Sets the granularity of the collation index of rows within a partition
+     * @deprecated use setColumnIndexSizeInKiB instead as it will not throw non-standard exceptions. See CASSANDRA-17668
+     */
+    @Deprecated(since = "5.0")
     public void setColumnIndexSize(int columnIndexSizeInKB);
 
-    /** Returns the threshold for skipping the column index when caching partition info **/
+    /**
+     * Returns the threshold for skipping the column index when caching partition info
+     * @deprecated use getColumnIndexCacheSizeInKiB. See CASSANDRA-17668
+     */
+    @Deprecated(since = "5.0")
     public int getColumnIndexCacheSize();
-    /** Sets the threshold for skipping the column index when caching partition info **/
+
+    /**
+     * Sets the threshold for skipping the column index when caching partition info
+     * @deprecated use setColumnIndexCacheSizeInKiB instead as it will not throw non-standard exceptions. See CASSANDRA-17668
+     */
+    @Deprecated(since = "5.0")
     public void setColumnIndexCacheSize(int cacheSizeInKB);
+
+    /** Returns the threshold for skipping the column index when caching partition info **/
+    public int getColumnIndexCacheSizeInKiB();
+
+    /** Sets the threshold for skipping the column index when caching partition info **/
+    public void setColumnIndexCacheSizeInKiB(int cacheSizeInKiB);
 
     /** Returns the threshold for rejecting queries due to a large batch size */
     public int getBatchSizeFailureThreshold();
     /** Sets the threshold for rejecting queries due to a large batch size */
     public void setBatchSizeFailureThreshold(int batchSizeDebugThreshold);
 
-    /** Returns the threshold for warning queries due to a large batch size */
+    /**
+     * Returns the threshold for warning queries due to a large batch size
+     * @deprecated use getBatchSizeWarnThresholdInKiB instead. See CASSANDRA-17668
+     */
+    @Deprecated(since = "5.0")
     public int getBatchSizeWarnThreshold();
-    /** Sets the threshold for warning queries due to a large batch size */
+    /**
+     * Sets the threshold for warning queries due to a large batch size
+     * @deprecated use setBatchSizeWarnThresholdInKiB instead as it will not throw non-standard exceptions. See CASSANDRA-17668
+     */
+    @Deprecated(since = "5.0")
     public void setBatchSizeWarnThreshold(int batchSizeDebugThreshold);
+
+    /** Returns the threshold for warning queries due to a large batch size */
+    public int getBatchSizeWarnThresholdInKiB();
+    /** Sets the threshold for warning queries due to a large batch size **/
+    public void setBatchSizeWarnThresholdInKiB(int batchSizeDebugThreshold);
 
     /** Sets the hinted handoff throttle in KiB per second, per delivery thread. */
     public void setHintedHandoffThrottleInKB(int throttleInKB);
 
     public boolean getTransferHintsOnDecommission();
     public void setTransferHintsOnDecommission(boolean enabled);
-
 
     /**
      * Resume bootstrap streaming when there is failed data streaming.
@@ -874,6 +1075,9 @@ public interface StorageServiceMBean extends NotificationEmitter
      * @return true if the node successfully starts resuming. (this does not mean bootstrap streaming was success.)
      */
     public boolean resumeBootstrap();
+
+    public String getBootstrapState();
+    void abortBootstrap(String nodeId, String endpoint);
 
     /** Gets the concurrency settings for processing stages*/
     static class StageConcurrency implements Serializable
@@ -900,13 +1104,15 @@ public interface StorageServiceMBean extends NotificationEmitter
                                String includedUsers, String excludedUsers, Integer maxArchiveRetries, Boolean block, String rollCycle,
                                Long maxLogSize, Integer maxQueueWeight, String archiveCommand) throws IllegalStateException;
 
+    /** @deprecated See CASSANDRA-16725 */
     @BreaksJMX("This API was exposed as throwing ConfigurationException, removing is binary compatible but not source; see https://docs.oracle.com/javase/specs/jls/se7/html/jls-13.html")
-    @Deprecated
+    @Deprecated(since = "4.1")
     public void enableAuditLog(String loggerName, Map<String, String> parameters, String includedKeyspaces, String excludedKeyspaces, String includedCategories, String excludedCategories,
                                String includedUsers, String excludedUsers) throws ConfigurationException, IllegalStateException;
 
+    /** @deprecated See CASSANDRA-16725 */
     @BreaksJMX("This API was exposed as throwing ConfigurationException, removing is binary compatible but not source; see https://docs.oracle.com/javase/specs/jls/se7/html/jls-13.html")
-    @Deprecated
+    @Deprecated(since = "4.1")
     public void enableAuditLog(String loggerName, String includedKeyspaces, String excludedKeyspaces, String includedCategories, String excludedCategories,
                                String includedUsers, String excludedUsers) throws ConfigurationException, IllegalStateException;
 
@@ -961,9 +1167,13 @@ public interface StorageServiceMBean extends NotificationEmitter
     /** Returns the resize factor to use when growing/resizing a RangeTombstoneList */
     public double getRangeTombstoneResizeListGrowthFactor();
 
-    /** Returns a map of schema version -> list of endpoints reporting that version that we need schema updates for */
-    @Deprecated
+    /**
+     * Returns a map of schema version -> list of endpoints reporting that version that we need schema updates for
+     * @deprecated See CASSANDRA-17668
+     */
+    @Deprecated(since = "4.0")
     public Map<String, Set<InetAddress>> getOutstandingSchemaVersions();
+    @Deprecated(since = "CEP-21")
     public Map<String, Set<String>> getOutstandingSchemaVersionsWithPort();
 
     // see CASSANDRA-3200
@@ -975,17 +1185,25 @@ public interface StorageServiceMBean extends NotificationEmitter
     public void setAutoOptimisePreviewRepairStreams(boolean enabled);
 
     // warning thresholds will be replaced by equivalent guardrails
-    @Deprecated
+    /** @deprecated See CASSANDRA-17195 */
+    @Deprecated(since = "4.1")
     int getTableCountWarnThreshold();
-    @Deprecated
+    /** @deprecated See CASSANDRA-17195 */
+    @Deprecated(since = "4.1")
     void setTableCountWarnThreshold(int value);
-    @Deprecated
+    /** @deprecated See CASSANDRA-17195 */
+    @Deprecated(since = "4.1")
     int getKeyspaceCountWarnThreshold();
-    @Deprecated
+    /** @deprecated See CASSANDRA-17195 */
+    @Deprecated(since = "4.1")
     void setKeyspaceCountWarnThreshold(int value);
 
-    public void setCompactionTombstoneWarningThreshold(int count);
-    public int getCompactionTombstoneWarningThreshold();
+    /** @deprecated See CASSANDRA-17194 */
+    @Deprecated(since = "5.0")
+    void setCompactionTombstoneWarningThreshold(int count);
+    /** @deprecated See CASSANDRA-17194 */
+    @Deprecated(since = "5.0")
+    int getCompactionTombstoneWarningThreshold();
 
     public boolean getReadThresholdsEnabled();
     public void setReadThresholdsEnabled(boolean value);
@@ -1058,8 +1276,8 @@ public interface StorageServiceMBean extends NotificationEmitter
     public long getMinTrackedPartitionTombstoneCount();
     public void setMinTrackedPartitionTombstoneCount(long value);
 
-    String getCQLStartTime();
-    void setCQLStartTime(String value);
+    public void setSkipStreamDiskSpaceCheck(boolean value);
+    public boolean getSkipStreamDiskSpaceCheck();
 
     double getNativeTransportQueueMaxItemAgeThreshold();
     void setNativeTransportQueueMaxItemAgeThreshold(double threshold);
@@ -1076,22 +1294,4 @@ public interface StorageServiceMBean extends NotificationEmitter
 
     boolean getEnforceNativeDeadlineForHints();
     void setEnforceNativeDeadlineForHints(boolean value);
-
-    /**
-     * Toggles to turn on the logging or rejection of operations for token ranges that the node does not own,
-     * or is not about to acquire.
-     */
-    boolean isOutOfTokenRangeRequestLoggingEnabled();
-    void setOutOfTokenRangeRequestLoggingEnabled(boolean enabled);
-
-    boolean isOutOfTokenRangeRequestRejectionEnabled();
-    void setOutOfTokenRangeRequestRejectionEnabled(boolean enabled);
-
-    /**
-     * Get the per-keyspace counts of operations that the node has received for tokens outside
-     * its owned ranges. Represented as a {@code Map<String, long[]>}, keys are keyspace names and the
-     * values are the counts for read, write and paxos ops respectivly.
-     * e.g. keyspace_name -> [reads, writes, paxos].
-     */
-    Map<String, long[]> getOutOfRangeOperationCounts();
 }

@@ -23,10 +23,10 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Predicate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import com.google.common.annotations.VisibleForTesting;
 
 import io.netty.channel.Channel;
 import io.netty.channel.EventLoop;
@@ -61,8 +61,6 @@ public class Dispatcher implements CQLMessageHandler.MessageConsumer<Message.Req
                                                                              "Native-Transport-Requests");
 
     /** CASSANDRA-17812: Rate-limit new client connection setup to avoid overwhelming during bcrypt
-     *
-     * Backported by CASSANDRA-20057
      *
      * authExecutor is a separate thread pool for handling requests on connections that need to be authenticated.
      * Calls to AUTHENTICATE can be expensive if the number of rounds for bcrypt is configured to a high value,
@@ -105,6 +103,20 @@ public class Dispatcher implements CQLMessageHandler.MessageConsumer<Message.Req
     @Override
     public void dispatch(Channel channel, Message.Request request, FlushItemConverter forFlusher, Overload backpressure)
     {
+        if (!request.connection().getTracker().isRunning())
+        {
+            // We can not respond with a custom, transport, or server exceptions since, given current implementation of clients,
+            // they will defunct the connection. Without a protocol version bump that introduces an "I am going away message",
+            // we have to stick to an existing error code.
+            Message.Response response = ErrorMessage.fromException(new OverloadedException("Server is shutting down"));
+            response.setStreamId(request.getStreamId());
+            response.setWarnings(ClientWarn.instance.getWarnings());
+            response.attach(request.connection);
+            FlushItem<?> toFlush = forFlusher.toFlushItem(channel, request, response);
+            flush(toFlush);
+            return;
+        }
+
         // if native_transport_max_auth_threads is < 1, don't delegate to new pool on auth messages
         boolean isAuthQuery = DatabaseDescriptor.getNativeTransportMaxAuthThreads() > 0 &&
                               (request.type == Message.Type.AUTH_RESPONSE || request.type == Message.Type.CREDENTIALS);
@@ -149,12 +161,13 @@ public class Dispatcher implements CQLMessageHandler.MessageConsumer<Message.Req
 
         /**
          * Base time is used by timeouts, and can be set to either when the request was added to the queue,
-         * or when the processing has started. Since client read/write timeouts are usually aligned with
-         * server-side timeouts, it is desireable to use enqueue time as a base. However, since client removes
-         * the handler `readTimeoutMillis` (which is 12 seconds by default), the upper bound for any execution on
-         * the coordinator is 12 seconds (thanks to CASSANDRA-7392, any replica-side query is capped by the verb timeout),
-         * if REQUEST option is used. But even simply allowing such long timeouts also implicitly allows queues to grow
-         * large, since our queues are currently unbounded.
+         * or when the processing has started, which is controlled by {@link DatabaseDescriptor#getCQLStartTime()}
+         *
+         * Since client read/write timeouts are usually aligned with server-side timeouts, it is desireable to use
+         * enqueue time as a base. However, since client removes the handler `readTimeoutMillis` (which is 12 seconds
+         * by default), the upper bound for any execution on the coordinator is 12 seconds (thanks to CASSANDRA-7392,
+         * any replica-side query is capped by the verb timeout), if REQUEST option is used. But even simply allowing
+         * such long timeouts also implicitly allows queues to grow large, since our queues are currently unbounded.
          *
          * Latency, however, is _always_ based on request processing time, since the amount of time that request spends
          * in the queue is not a representative metric of replica performance.
@@ -190,7 +203,7 @@ public class Dispatcher implements CQLMessageHandler.MessageConsumer<Message.Req
          * The client timeout represents how long the sender of a request is prepared to wait for a response. By
          * implication, after this window has passed any further work done on the server side is wasted effort. Ideally,
          * the base for this timeout would be set on a per-request basis but as this not currently supported in the
-         * protocol, it is configured uniformly for all requests. See {@DatabaseDescriptor#getNativeTransportTimeout}.
+         * protocol, it is configured uniformly for all requests. See {@link DatabaseDescriptor#getNativeTransportTimeout}.
          * For this calculation, elapsed time is always measured from the point when a request is received and enqueued.
          *
          * Where verb timeout is based on queue admission, deadline computation is straightforward. The expiration
@@ -466,6 +479,11 @@ public class Dispatcher implements CQLMessageHandler.MessageConsumer<Message.Req
 
         flusher.enqueue(item);
         flusher.start();
+    }
+
+    public boolean isDone()
+    {
+        return requestExecutor.getPendingTaskCount() == 0 && requestExecutor.getActiveTaskCount() == 0;
     }
 
     public static void shutdown()

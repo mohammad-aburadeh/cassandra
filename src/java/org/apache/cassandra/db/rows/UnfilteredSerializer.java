@@ -20,15 +20,16 @@ package org.apache.cassandra.db.rows;
 import java.io.IOException;
 
 import net.nicoulaj.compilecommand.annotations.Inline;
-import org.apache.cassandra.db.marshal.ByteArrayAccessor;
-import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.marshal.ByteArrayAccessor;
 import org.apache.cassandra.db.rows.Row.Deletion;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.io.util.FileDataInput;
 import org.apache.cassandra.io.util.TrackedDataInputPlus;
+import org.apache.cassandra.net.MessagingService;
+import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.utils.SearchIterator;
 import org.apache.cassandra.utils.WrappedException;
 
@@ -114,8 +115,10 @@ public class UnfilteredSerializer
     /**
      * A shadowable tombstone cannot replace a previous row deletion otherwise it could resurrect a
      * previously deleted cell not updated by a subsequent update, SEE CASSANDRA-11500
+     *
+     * @deprecated See CASSANDRA-11500
      */
-    @Deprecated
+    @Deprecated(since = "4.0")
     private final static int HAS_SHADOWABLE_DELETION = 0x02; // Whether the row deletion is shadowable. If there is no extended flag (or no row deletion), the deletion is assumed not shadowable.
 
     public void serialize(Unfiltered unfiltered, SerializationHelper helper, DataOutputPlus out, int version)
@@ -197,7 +200,7 @@ public class UnfilteredSerializer
                 // We write the size of the previous unfiltered to make reverse queries more efficient (and simpler).
                 // This is currently not used however and using it is tbd.
                 out.writeUnsignedVInt(previousUnfilteredSize);
-                out.write(dob.getData(), 0, dob.getLength());
+                out.write(dob.unsafeGetBufferAndFlip());
             }
         }
         else
@@ -271,7 +274,7 @@ public class UnfilteredSerializer
         if (hasComplexDeletion)
             header.writeDeletionTime(data.complexDeletion(), out);
 
-        out.writeUnsignedVInt(data.cellsCount());
+        out.writeUnsignedVInt32(data.cellsCount());
         for (Cell<?> cell : data)
             Cell.serializer.serialize(cell, column, out, rowLiveness, header);
     }
@@ -589,7 +592,11 @@ public class UnfilteredSerializer
             {
                 long timestamp = header.readTimestamp(in);
                 int ttl = hasTTL ? header.readTTL(in) : LivenessInfo.NO_TTL;
-                int localDeletionTime = hasTTL ? header.readLocalDeletionTime(in) : LivenessInfo.NO_EXPIRATION_TIME;
+                assert ttl >= 0 : "Invalid TTL " + ttl;
+                long localDeletionTime = hasTTL ? header.readLocalDeletionTime(in) : LivenessInfo.NO_EXPIRATION_TIME;
+
+                localDeletionTime = Cell.decodeLocalDeletionTime(localDeletionTime, ttl, helper);
+
                 rowLiveness = LivenessInfo.withExpirationTime(timestamp, ttl, localDeletionTime);
             }
 
@@ -661,11 +668,18 @@ public class UnfilteredSerializer
             if (hasComplexDeletion)
             {
                 DeletionTime complexDeletion = header.readDeletionTime(in);
+                if (complexDeletion.localDeletionTime() < 0)
+                {
+                    if (helper.version < MessagingService.VERSION_50)
+                        complexDeletion = DeletionTime.build(complexDeletion.markedForDeleteAt(), Cell.INVALID_DELETION_TIME);
+                    else
+                        complexDeletion = DeletionTime.build(complexDeletion.markedForDeleteAt(), Cell.deletionTimeUnsignedIntegerToLong((int) complexDeletion.localDeletionTime()));
+                }
                 if (!helper.isDroppedComplexDeletion(complexDeletion))
                     builder.addComplexDeletion(column, complexDeletion);
             }
 
-            int count = (int) in.readUnsignedVInt();
+            int count = in.readUnsignedVInt32();
             while (--count >= 0)
             {
                 Cell<byte[]> cell = Cell.serializer.deserialize(in, rowLiveness, column, header, helper, ByteArrayAccessor.instance);
@@ -683,7 +697,7 @@ public class UnfilteredSerializer
 
     public void skipRowBody(DataInputPlus in) throws IOException
     {
-        int rowSize = (int)in.readUnsignedVInt();
+        int rowSize = in.readUnsignedVInt32();
         in.skipBytesFully(rowSize);
     }
 
@@ -698,7 +712,7 @@ public class UnfilteredSerializer
 
     public void skipMarkerBody(DataInputPlus in) throws IOException
     {
-        int markerSize = (int)in.readUnsignedVInt();
+        int markerSize = in.readUnsignedVInt32();
         in.skipBytesFully(markerSize);
     }
 
@@ -708,7 +722,7 @@ public class UnfilteredSerializer
         if (hasComplexDeletion)
             header.skipDeletionTime(in);
 
-        int count = (int) in.readUnsignedVInt();
+        int count = in.readUnsignedVInt32();
         while (--count >= 0)
             Cell.serializer.skip(in, column, header);
     }

@@ -17,20 +17,18 @@
  */
 package org.apache.cassandra.service.reads;
 
+import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
 
-import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.MessageParams;
-import org.apache.cassandra.locator.ReplicaPlan;
-import org.apache.cassandra.transport.Dispatcher;
-import org.apache.cassandra.utils.concurrent.Condition;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.db.MessageParams;
 import org.apache.cassandra.db.PartitionRangeReadCommand;
 import org.apache.cassandra.db.ReadCommand;
 import org.apache.cassandra.db.ReadResponse;
@@ -39,6 +37,7 @@ import org.apache.cassandra.exceptions.ReadTimeoutException;
 import org.apache.cassandra.exceptions.RequestFailureReason;
 import org.apache.cassandra.locator.Endpoints;
 import org.apache.cassandra.locator.InetAddressAndPort;
+import org.apache.cassandra.locator.ReplicaPlan;
 import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.ParamType;
 import org.apache.cassandra.net.RequestCallback;
@@ -46,7 +45,10 @@ import org.apache.cassandra.net.Verb;
 import org.apache.cassandra.service.reads.thresholds.CoordinatorWarnings;
 import org.apache.cassandra.service.reads.thresholds.WarningContext;
 import org.apache.cassandra.service.reads.thresholds.WarningsSnapshot;
+import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.tracing.Tracing;
+import org.apache.cassandra.transport.Dispatcher;
+import org.apache.cassandra.utils.concurrent.Condition;
 import org.apache.cassandra.utils.concurrent.UncheckedInterruptedException;
 
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
@@ -61,7 +63,6 @@ public class ReadCallback<E extends Endpoints<E>, P extends ReplicaPlan.ForRead<
     public final ResponseResolver<E, P> resolver;
     final Condition condition = newOneTimeCondition();
     private final Dispatcher.RequestTime requestTime;
-    final int blockFor; // TODO: move to replica plan as well?
     // this uses a plain reference, but is initialised before handoff to any other threads; the later updates
     // may not be visible to the threads immediately, but ReplicaPlan only contains final fields, so they will never see an uninitialised object
     final ReplicaPlan.Shared<E, P> replicaPlan;
@@ -80,13 +81,12 @@ public class ReadCallback<E extends Endpoints<E>, P extends ReplicaPlan.ForRead<
         this.resolver = resolver;
         this.requestTime = requestTime;
         this.replicaPlan = replicaPlan;
-        this.blockFor = replicaPlan.get().readQuorum();
         this.failureReasonByEndpoint = new ConcurrentHashMap<>();
         // we don't support read repair (or rapid read protection) for range scans yet (CASSANDRA-6897)
-        assert !(command instanceof PartitionRangeReadCommand) || blockFor >= replicaPlan().contacts().size();
+        assert !(command instanceof PartitionRangeReadCommand) || replicaPlan().readQuorum() >= replicaPlan().contacts().size();
 
         if (logger.isTraceEnabled())
-            logger.trace("Blockfor is {}; setting up requests to {}", blockFor, this.replicaPlan);
+            logger.trace("Blockfor is {}; setting up requests to {}", replicaPlan().readQuorum(), this.replicaPlan);
     }
 
     protected P replicaPlan()
@@ -102,7 +102,8 @@ public class ReadCallback<E extends Endpoints<E>, P extends ReplicaPlan.ForRead<
     /**
      * In case of speculation, we want to time out the request immediately if we have _also_ hit a deadline.
      *
-     * For example, we have a read timeout of 10s, 99% latency of 5 seconds, and time base is QUEUE:
+     * For example, we have a read timeout of 10s, 99% latency of 5 seconds, native_transport_timeout of 12s,
+     * and time base is QUEUE:
      *   * Request has spent 3 seconds in the queue. Here, we will wait for 2 seconds and try to speculate
      *   * Request has spent 10 seconds in the queue. Here, we will wait for 0 seconds and try to speculate
      *
@@ -134,7 +135,13 @@ public class ReadCallback<E extends Endpoints<E>, P extends ReplicaPlan.ForRead<
          * CASSANDRA-16097
          */
         int received = resolver.responses.size();
-        boolean failed = failures > 0 && (blockFor > received || !resolver.isDataPresent());
+        boolean failed = failures > 0 && (replicaPlan().readQuorum() > received || !resolver.isDataPresent());
+        // If all messages came back as a TIMEOUT then signaled=true and failed=true.
+        // Need to distinguish between a timeout and a failure (network, bad data, etc.), so store an extra field.
+        // see CASSANDRA-17828
+        boolean timedout = !signaled;
+        if (failed)
+            timedout = RequestCallback.isTimeout(new HashMap<>(failureReasonByEndpoint));
         WarningContext warnings = warningContext;
         // save the snapshot so abort state is not changed between now and when mayAbort gets called
         WarningsSnapshot snapshot = null;
@@ -147,32 +154,28 @@ public class ReadCallback<E extends Endpoints<E>, P extends ReplicaPlan.ForRead<
             if (!snapshot.isEmpty())
                 CoordinatorWarnings.update(command, snapshot);
         }
-        if (signaled && !failed)
+
+        if (signaled && !failed && replicaPlan().stillAppliesTo(ClusterMetadata.current()))
             return;
 
         if (isTracing())
         {
             String gotData = received > 0 ? (resolver.isDataPresent() ? " (including data)" : " (only digests)") : "";
-            Tracing.trace("{}; received {} of {} responses{}", failed ? "Failed" : "Timed out", received, blockFor, gotData);
+            Tracing.trace("{}; received {} of {} responses{}", !timedout ? "Failed" : "Timed out", received, replicaPlan().readQuorum(), gotData);
         }
         else if (logger.isDebugEnabled())
         {
             String gotData = received > 0 ? (resolver.isDataPresent() ? " (including data)" : " (only digests)") : "";
-            logger.debug("{}; received {} of {} responses{}", failed ? "Failed" : "Timed out", received, blockFor, gotData);
+            logger.debug("{}; received {} of {} responses{}", !timedout ? "Failed" : "Timed out", received, replicaPlan().readQuorum(), gotData);
         }
 
         if (snapshot != null)
-            snapshot.maybeAbort(command, replicaPlan().consistencyLevel(), received, blockFor, resolver.isDataPresent(), failureReasonByEndpoint);
+            snapshot.maybeAbort(command, replicaPlan().consistencyLevel(), received, replicaPlan().readQuorum(), resolver.isDataPresent(), failureReasonByEndpoint);
 
         // Same as for writes, see AbstractWriteResponseHandler
-        throw failed
-            ? new ReadFailureException(replicaPlan().consistencyLevel(), received, blockFor, resolver.isDataPresent(), failureReasonByEndpoint)
-            : new ReadTimeoutException(replicaPlan().consistencyLevel(), received, blockFor, resolver.isDataPresent());
-    }
-
-    public int blockFor()
-    {
-        return blockFor;
+        throw !timedout
+            ? new ReadFailureException(replicaPlan().consistencyLevel(), received, replicaPlan().readQuorum(), resolver.isDataPresent(), failureReasonByEndpoint)
+            : new ReadTimeoutException(replicaPlan().consistencyLevel(), received, replicaPlan().readQuorum(), resolver.isDataPresent());
     }
 
     @Override
@@ -184,6 +187,7 @@ public class ReadCallback<E extends Endpoints<E>, P extends ReplicaPlan.ForRead<
         if (WarningContext.isSupported(params.keySet()))
         {
             RequestFailureReason reason = getWarningContext().updateCounters(params, from);
+            replicaPlan().collectFailure(message.from(), reason);
             if (reason != null)
             {
                 onFailure(message.from(), reason);
@@ -191,6 +195,7 @@ public class ReadCallback<E extends Endpoints<E>, P extends ReplicaPlan.ForRead<
             }
         }
         resolver.preprocess(message);
+        replicaPlan().collectSuccess(message.from());
 
         /*
          * Ensure that data is present and the response accumulator has properly published the
@@ -198,7 +203,7 @@ public class ReadCallback<E extends Endpoints<E>, P extends ReplicaPlan.ForRead<
          * the minimum number of required results, but it guarantees at least the minimum will
          * be accessible when we do signal. (see CASSANDRA-16807)
          */
-        if (resolver.isDataPresent() && resolver.responses.size() >= blockFor)
+        if (resolver.isDataPresent() && resolver.responses.size() >= replicaPlan().readQuorum())
             condition.signalAll();
     }
 
@@ -237,7 +242,7 @@ public class ReadCallback<E extends Endpoints<E>, P extends ReplicaPlan.ForRead<
                 
         failureReasonByEndpoint.put(from, failureReason);
 
-        if (blockFor + failuresUpdater.incrementAndGet(this) > replicaPlan().contacts().size())
+        if (replicaPlan().readQuorum() + failuresUpdater.incrementAndGet(this) > replicaPlan().contacts().size())
             condition.signalAll();
     }
 

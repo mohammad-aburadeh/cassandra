@@ -51,6 +51,10 @@ public abstract class Guardrail
     /** A name identifying the guardrail (mainly for shipping with diagnostic events). */
     public final String name;
 
+    /** An optional description of the reason for guarding the operation. */
+    @Nullable
+    public final String reason;
+
     /** Minimum logging and triggering interval to avoid spamming downstream. */
     private long minNotifyIntervalInMs = 0;
 
@@ -60,9 +64,13 @@ public abstract class Guardrail
     /** Time of last failure in milliseconds. */
     private volatile long lastFailInMs = 0;
 
-    Guardrail(String name)
+    /** Should throw exception if null client state is provided. */
+    protected volatile boolean throwOnNullClientState = false;
+
+    Guardrail(String name, @Nullable String reason)
     {
         this.name = name;
+        this.reason = reason;
     }
 
     /**
@@ -87,7 +95,7 @@ public abstract class Guardrail
      */
     public boolean enabled(@Nullable ClientState state)
     {
-        return DatabaseDescriptor.isDaemonInitialized() && (state == null || state.isOrdinaryUser());
+        return DatabaseDescriptor.isDaemonInitialized() && (state == null || (state.isOrdinaryUser() && state.applyGuardrails()));
     }
 
     protected void warn(String message)
@@ -131,15 +139,23 @@ public abstract class Guardrail
             GuardrailsDiagnostics.failed(name, decorateMessage(redactedMessage));
         }
 
-        if (state != null)
+        if (state != null || throwOnNullClientState)
             throw new GuardrailViolatedException(message);
     }
 
     @VisibleForTesting
     String decorateMessage(String message)
     {
-        // Add a prefix to error message so user knows what threw the warning or cause the failure
-        return String.format("Guardrail %s violated: %s", name, message);
+        // Add a prefix to error message so user knows what threw the warning or cause the failure.
+        String decoratedMessage = String.format("Guardrail %s violated: %s", name, message);
+
+        // Add the reason for the guardrail triggering, if there is any.
+        if (reason != null)
+        {
+            decoratedMessage += (message.endsWith(".") ? ' ' : ". ") + reason;
+        }
+
+        return decoratedMessage;
     }
 
     /**
@@ -153,6 +169,19 @@ public abstract class Guardrail
     {
         assert minNotifyIntervalInMs >= 0;
         this.minNotifyIntervalInMs = minNotifyIntervalInMs;
+        return this;
+    }
+
+    /**
+     * Note: this method is not thread safe and should only be used during guardrail initialization
+     *
+     * @param shouldThrow if exception should throw when Guardrail is violated,
+     *                    default false means don't throw expection when client state is not provided.
+     * @return current guardrail
+     */
+    Guardrail throwOnNullClientState(boolean shouldThrow)
+    {
+        this.throwOnNullClientState = shouldThrow;
         return this;
     }
 

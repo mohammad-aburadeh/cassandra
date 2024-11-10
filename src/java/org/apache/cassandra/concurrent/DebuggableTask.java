@@ -34,7 +34,7 @@ public interface DebuggableTask
 {
     public default long elapsedSinceCreation()
     {
-        return MonotonicClock.Global.approxTime.now() - creationTimeNanos();
+        return MonotonicClock.Global.preciseTime.now() - creationTimeNanos();
     }
 
     public long creationTimeNanos();

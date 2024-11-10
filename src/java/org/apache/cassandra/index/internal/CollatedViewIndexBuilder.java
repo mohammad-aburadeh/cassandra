@@ -31,7 +31,6 @@ import org.apache.cassandra.index.SecondaryIndexBuilder;
 import org.apache.cassandra.io.sstable.ReducingKeyIterator;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.schema.ColumnMetadata;
-import org.apache.cassandra.utils.Closeable;
 import org.apache.cassandra.utils.TimeUUID;
 
 import static org.apache.cassandra.utils.TimeUUID.Generator.nextTimeUUID;
@@ -39,7 +38,7 @@ import static org.apache.cassandra.utils.TimeUUID.Generator.nextTimeUUID;
 /**
  * Manages building an entire index from column family data. Runs on to compaction manager.
  */
-public class CollatedViewIndexBuilder extends SecondaryIndexBuilder implements Closeable
+public class CollatedViewIndexBuilder extends SecondaryIndexBuilder
 {
     private final ColumnFamilyStore cfs;
     private final Set<Index> indexers;
@@ -68,22 +67,23 @@ public class CollatedViewIndexBuilder extends SecondaryIndexBuilder implements C
 
     public void build()
     {
-        int pageSize = cfs.indexManager.calculateIndexingPageSize();
-        RegularAndStaticColumns targetPartitionColumns = extractIndexedColumns();
-
-        while (iter.hasNext())
+        try
         {
-            if (isStopRequested())
-                throw new CompactionInterruptedException(getCompactionInfo());
-            DecoratedKey key = iter.next();
-            cfs.indexManager.indexPartition(key, indexers, pageSize, targetPartitionColumns);
+            int pageSize = cfs.indexManager.calculateIndexingPageSize();
+            RegularAndStaticColumns targetPartitionColumns = extractIndexedColumns();
+            
+            while (iter.hasNext())
+            {
+                if (isStopRequested())
+                    throw new CompactionInterruptedException(getCompactionInfo());
+                DecoratedKey key = iter.next();
+                cfs.indexManager.indexPartition(key, indexers, pageSize, targetPartitionColumns);
+            }
         }
-    }
-
-    @Override
-    public void close()
-    {
-        iter.close();
+        finally
+        {
+            iter.close();
+        }
     }
 
     private RegularAndStaticColumns extractIndexedColumns()

@@ -27,11 +27,14 @@ import java.sql.Timestamp;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.Random;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
 
+import com.google.common.collect.Range;
 import org.apache.commons.lang3.ArrayUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -40,6 +43,9 @@ import org.quicktheories.core.Gen;
 import org.quicktheories.core.RandomnessSource;
 import org.quicktheories.generators.SourceDSL;
 import org.quicktheories.impl.Constraint;
+import org.quicktheories.impl.JavaRandom;
+
+import static org.apache.cassandra.config.CassandraRelevantProperties.TEST_BLOB_SHARED_SEED;
 
 public final class Generators
 {
@@ -67,6 +73,7 @@ public final class Generators
     {
         return SourceDSL.integers().between(0, LETTER_OR_DIGIT_DOMAIN.length - 1).map(idx -> LETTER_OR_DIGIT_DOMAIN[idx]);
     }
+
     public static final Gen<UUID> UUID_RANDOM_GEN = rnd -> {
         long most = rnd.next(Constraint.none());
         most &= 0x0f << 8; /* clear version        */
@@ -316,6 +323,16 @@ public final class Generators
 
     public static Gen<ByteBuffer> bytes(int min, int max)
     {
+        return bytes(min, max, SourceDSL.arbitrary().constant(BBCases.HEAP));
+    }
+
+    public static Gen<ByteBuffer> bytesAnyType(int min, int max)
+    {
+        return bytes(min, max, SourceDSL.arbitrary().enumValues(BBCases.class));
+    }
+
+    private static Gen<ByteBuffer> bytes(int min, int max, Gen<BBCases> cases)
+    {
         if (min < 0)
             throw new IllegalArgumentException("Asked for negative bytes; given " + min);
         if (max > MAX_BLOB_LENGTH)
@@ -330,11 +347,31 @@ public final class Generators
             // to add more randomness, also shift offset in the array so the same size doesn't yield the same bytes
             int offset = (int) rnd.next(Constraint.between(0, MAX_BLOB_LENGTH - size));
 
-            return ByteBuffer.wrap(LazySharedBlob.SHARED_BYTES, offset, size);
+            return handleCases(cases, rnd, offset, size);
         };
+    };
+
+    private enum BBCases { HEAP, READ_ONLY_HEAP, DIRECT, READ_ONLY_DIRECT }
+
+    private static ByteBuffer handleCases(Gen<BBCases> cases, RandomnessSource rnd, int offset, int size) {
+        switch (cases.generate(rnd))
+        {
+            case HEAP: return ByteBuffer.wrap(LazySharedBlob.SHARED_BYTES, offset, size);
+            case READ_ONLY_HEAP: return ByteBuffer.wrap(LazySharedBlob.SHARED_BYTES, offset, size).asReadOnlyBuffer();
+            case DIRECT: return directBufferFromSharedBlob(offset, size);
+            case READ_ONLY_DIRECT: return directBufferFromSharedBlob(offset, size).asReadOnlyBuffer();
+            default: throw new AssertionError("can't wait for jdk 17!");
+        }
     }
 
-    /**
+    private static ByteBuffer directBufferFromSharedBlob(int offset, int size) {
+        ByteBuffer bb = ByteBuffer.allocateDirect(size);
+        bb.put(LazySharedBlob.SHARED_BYTES, offset, size);
+        bb.flip();
+        return bb;
+    }
+
+     /**
      * Implements a valid utf-8 generator.
      *
      * Implementation note, currently relies on getBytes to strip out non-valid utf-8 chars, so is slow
@@ -389,6 +426,28 @@ public final class Generators
         };
     }
 
+    public static <T> Gen<T> unique(Gen<T> gen)
+    {
+        Set<T> dedup = new HashSet<>();
+        return filter(gen, dedup::add);
+    }
+
+    public static <T> Gen<T> cached(Gen<T> gen)
+    {
+        Object cacheMissed = new Object();
+        return new Gen<T>()
+        {
+            private Object value = cacheMissed;
+            @Override
+            public T generate(RandomnessSource randomnessSource)
+            {
+                if (value == cacheMissed)
+                    value = gen.generate(randomnessSource);
+                return (T) value;
+            }
+        };
+    }
+
     private static boolean isDash(char c)
     {
         switch (c)
@@ -407,7 +466,7 @@ public final class Generators
 
         static
         {
-            long blobSeed = Long.parseLong(System.getProperty("cassandra.test.blob.shared.seed", Long.toString(System.currentTimeMillis())));
+            long blobSeed = TEST_BLOB_SHARED_SEED.getLong(System.currentTimeMillis());
             logger.info("Shared blob Gen used seed {}", blobSeed);
 
             Random random = new Random(blobSeed);
@@ -467,5 +526,20 @@ public final class Generators
             }
             throw new IllegalStateException("Gave up trying to find values matching assumptions after " + maxAttempts + " attempts");
         }
+    }
+
+    public static Gen<Range<Integer>> forwardRanges(int min, int max)
+    {
+        return SourceDSL.integers().between(min, max)
+                        .flatMap(start -> SourceDSL.integers().between(start, max)
+                                                   .map(end -> Range.closed(start, end)));
+    }
+
+    public static <T> accord.utils.Gen<T> toGen(org.quicktheories.core.Gen<T> qt)
+    {
+        return rs -> {
+            JavaRandom r = new JavaRandom(rs.asJdkRandom());
+            return qt.generate(r);
+        };
     }
 }

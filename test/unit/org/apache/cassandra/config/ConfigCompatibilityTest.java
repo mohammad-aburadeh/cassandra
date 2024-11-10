@@ -89,6 +89,38 @@ public class ConfigCompatibilityTest
                                                      .add("streaming_socket_timeout_in_ms") // CASSANDRA-12229
                                                      .build();
 
+    private static final Set<String> REMOVED_IN_50 = ImmutableSet.<String>builder()
+                                                                 .add("commitlog_sync_batch_window_in_ms")
+                                                                 .add("native_transport_max_negotiable_protocol_version")
+                                                                 .add("concurrent_replicates")
+                                                                 .add("commitlog_periodic_queue_size")
+                                                                 .build();
+
+    private static final Set<String> REMOVED_IN_51 = ImmutableSet.<String>builder()
+                                                                 .add("native_transport_port_ssl")
+                                                                 .build();
+
+    private static final Set<String> ALLOW_LIST = ImmutableSet.<String>builder()
+                                                              .addAll(REMOVED_IN_40)
+                                                              .addAll(REMOVED_IN_50)
+                                                              .addAll(REMOVED_IN_51)
+                                                              .build();
+
+    private static final Set<String> EXPECTED_FOR_50 = ImmutableSet.<String>builder()
+                                                                   // Switched to a parameterized class that can construct from a bare string
+                                                                   .add("internode_authenticator types do not match; org.apache.cassandra.config.ParameterizedClass != java.lang.String")
+                                                                   .add("authenticator types do not match; org.apache.cassandra.config.ParameterizedClass != java.lang.String")
+                                                                   .add("authorizer types do not match; org.apache.cassandra.config.ParameterizedClass != java.lang.String")
+                                                                   .add("network_authorizer types do not match; org.apache.cassandra.config.ParameterizedClass != java.lang.String")
+                                                                   .add("role_manager types do not match; org.apache.cassandra.config.ParameterizedClass != java.lang.String")
+                                                                   .add("Property internode_authenticator used to be a value-type, but now is nested type class org.apache.cassandra.config.ParameterizedClass")
+                                                                   .add("Property authenticator used to be a value-type, but now is nested type class org.apache.cassandra.config.ParameterizedClass")
+                                                                   .add("Property authorizer used to be a value-type, but now is nested type class org.apache.cassandra.config.ParameterizedClass")
+                                                                   .add("Property role_manager used to be a value-type, but now is nested type class org.apache.cassandra.config.ParameterizedClass")
+                                                                   .add("Property network_authorizer used to be a value-type, but now is nested type class org.apache.cassandra.config.ParameterizedClass")
+                                                                   .add("require_client_auth types do not match; java.lang.String != java.lang.Boolean")
+                                                                   .build();
+
     /**
      * Not all converts make sense as backwards compatible as they use things like String to handle the conversion more
      * generically.
@@ -98,24 +130,49 @@ public class ConfigCompatibilityTest
     @Test
     public void diff_3_0() throws IOException
     {
-        diff(TEST_DIR + "/version=3.0.0-alpha1.yml", REMOVED_IN_40);
+        diff(TEST_DIR + "/version=3.0.0-alpha1.yml", ALLOW_LIST, EXPECTED_FOR_50);
     }
 
     @Test
     public void diff_3_11() throws IOException
     {
-        diff(TEST_DIR + "/version=3.11.0.yml", REMOVED_IN_40);
+        diff(TEST_DIR + "/version=3.11.0.yml", ALLOW_LIST, EXPECTED_FOR_50);
     }
 
     @Test
     public void diff_4_0() throws IOException
     {
         diff(TEST_DIR + "/version=4.0-alpha1.yml", ImmutableSet.<String>builder()
-                                                        .addAll(WINDOWS)
-                                                        .build());
+                                                               .addAll(WINDOWS)
+                                                               .addAll(ALLOW_LIST)
+                                                               .build(), EXPECTED_FOR_50);
     }
 
-    private void diff(String original, Set<String> ignore) throws IOException
+    @Test
+    public void diff_4_1() throws IOException
+    {
+        diff(TEST_DIR + "/version=4.1-alpha1.yml", ImmutableSet.<String>builder()
+                                                               .addAll(WINDOWS)
+                                                               .addAll(ALLOW_LIST)
+                                                               .build(), EXPECTED_FOR_50);
+    }
+
+    @Test
+    public void diff_5_0() throws IOException
+    {
+        diff(TEST_DIR + "/version=5.0-alpha1.yml", ImmutableSet.<String>builder()
+                                                               .addAll(REMOVED_IN_51)
+                                                               .build(), EXPECTED_FOR_50);
+    }
+
+    @Test
+    public void diff_5_1() throws IOException
+    {
+        diff(TEST_DIR + "/version=5.1-alpha1.yml", ImmutableSet.<String>builder()
+                                                               .build(), ImmutableSet.of());
+    }
+
+    private void diff(String original, Set<String> ignore, Set<String> expectedErrors) throws IOException
     {
         Class<Config> type = Config.class;
         ClassTree previous = load(original);
@@ -125,6 +182,7 @@ public class ConfigCompatibilityTest
         Set<String> errors = new HashSet<>();
         diff(loader, replacements, previous, type, "", missing, errors);
         missing = Sets.difference(missing, ignore);
+        errors = Sets.difference(errors, expectedErrors);
         StringBuilder msg = new StringBuilder();
         if (!missing.isEmpty())
             msg.append(String.format("Unable to find the following properties:\n%s", String.join("\n", new TreeSet<>(missing))));
@@ -201,14 +259,14 @@ public class ConfigCompatibilityTest
 
     private static ClassTree load(String path) throws IOException
     {
-        ObjectMapper mapper = new ObjectMapper(new YAMLFactory());
+        ObjectMapper mapper = new ObjectMapper(new YAMLFactory()); // checkstyle: permit this instantiation
         return mapper.readValue(new File(path), ClassTree.class);
     }
 
     public static void dump(ClassTree classTree, String path) throws IOException
     {
         logger.info("Dumping class to {}", path);
-        ObjectMapper mapper = new ObjectMapper(new YAMLFactory());
+        ObjectMapper mapper = new ObjectMapper(new YAMLFactory()); // checkstyle: permit this instantiation
         mapper.writeValue(new File(path), classTree);
 
         // validate that load works as expected

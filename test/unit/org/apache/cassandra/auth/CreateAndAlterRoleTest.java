@@ -25,9 +25,8 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 
 import com.datastax.driver.core.ResultSet;
-import com.datastax.driver.core.exceptions.AuthenticationException;
 import com.datastax.driver.core.exceptions.InvalidQueryException;
-import org.apache.cassandra.Util;
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQLTester;
 
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -39,9 +38,12 @@ import static org.mindrot.jbcrypt.BCrypt.hashpw;
 public class CreateAndAlterRoleTest extends CQLTester
 {
     @BeforeClass
-    public static void setUpClass()
+    public static void setUpAuth()
     {
-        CQLTester.setUpClass();
+        DatabaseDescriptor.setPermissionsValidity(0);
+        DatabaseDescriptor.setRolesValidity(0);
+        DatabaseDescriptor.setCredentialsValidity(0);
+
         requireAuthentication();
         requireNetwork();
     }
@@ -69,11 +71,11 @@ public class CreateAndAlterRoleTest extends CQLTester
 
         useUser(user1, plainTextPwd);
 
-        executeNetWithAuthSpin("SELECT key FROM system.local");
+        executeNet("SELECT key FROM system.local");
 
         useUser(user2, plainTextPwd);
 
-        executeNetWithAuthSpin("SELECT key FROM system.local");
+        executeNet("SELECT key FROM system.local");
 
         useSuperUser();
 
@@ -85,11 +87,11 @@ public class CreateAndAlterRoleTest extends CQLTester
 
         useUser(user1, plainTextPwd2);
 
-        executeNetWithAuthSpin("SELECT key FROM system.local");
+        executeNet("SELECT key FROM system.local");
 
         useUser(user2, plainTextPwd2);
 
-        executeNetWithAuthSpin("SELECT key FROM system.local");
+        executeNet("SELECT key FROM system.local");
     }
 
     @Test
@@ -108,15 +110,15 @@ public class CreateAndAlterRoleTest extends CQLTester
                              String.format("CREATE USER %s WITH hashed password '%s'",
                                            user1, "this_is_an_invalid_hash"));
         executeNet(String.format("CREATE USER %s WITH hashed password '%s'", user1, hashedPassword));
-        executeNet(String.format("CREATE USER %s WITH password '%s'", user2, plainTextPwd));
+        executeNet(String.format("CREATE USER %s WITH password '%s'",  user2, plainTextPwd));
 
         useUser(user1, plainTextPwd);
 
-        executeNetWithAuthSpin("SELECT key FROM system.local");
+        executeNet("SELECT key FROM system.local");
 
         useUser(user2, plainTextPwd);
 
-        executeNetWithAuthSpin("SELECT key FROM system.local");
+        executeNet("SELECT key FROM system.local");
 
         useSuperUser();
 
@@ -125,15 +127,15 @@ public class CreateAndAlterRoleTest extends CQLTester
 
         useUser(user1, plainTextPwd2);
 
-        executeNetWithAuthSpin("SELECT key FROM system.local");
+        executeNet("SELECT key FROM system.local");
 
         useUser(user2, plainTextPwd2);
 
-        executeNetWithAuthSpin("SELECT key FROM system.local");
+        executeNet("SELECT key FROM system.local");
     }
 
     @Test
-    public void createAlterRoleIfExists() throws Throwable
+    public void createAlterRoleIfExists()
     {
         useSuperUser();
 
@@ -155,33 +157,11 @@ public class CreateAndAlterRoleTest extends CQLTester
         assertFalse(roles.contains("also_does_not_exist_yet"));
     }
 
-    private Set<String> getAllRoles() throws Throwable
+    private Set<String> getAllRoles()
     {
         ResultSet rows = executeNet("SELECT role FROM system_auth.roles");
         Set<String> roles = new HashSet<>();
         rows.forEach(row -> roles.add(row.getString(0)));
         return roles;
-    }
-
-    /**
-     * Altering or creating auth may take some time to be effective
-     *
-     * @param query
-     */
-    void executeNetWithAuthSpin(String query)
-    {
-        Util.spinAssertEquals(true, () -> {
-            try
-            {
-                executeNet(query);
-                return true;
-            }
-            catch (Throwable e)
-            {
-                assertTrue("Unexpected exception: " + e, e instanceof AuthenticationException);
-                reinitializeNetwork();
-                return false;
-            }
-        }, 10);
     }
 }

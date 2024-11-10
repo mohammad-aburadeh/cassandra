@@ -56,7 +56,7 @@ class SSTableSimpleUnsortedWriter extends AbstractSSTableSimpleWriter
     private static final Buffer SENTINEL = new Buffer();
 
     private Buffer buffer = new Buffer();
-    private final long maxSSTableSizeInBytes;
+    private final long maxSStableSizeInBytes;
     private long currentSize;
 
     // Used to compute the row serialized size
@@ -69,7 +69,7 @@ class SSTableSimpleUnsortedWriter extends AbstractSSTableSimpleWriter
     SSTableSimpleUnsortedWriter(File directory, TableMetadataRef metadata, RegularAndStaticColumns columns, long maxSSTableSizeInMiB)
     {
         super(directory, metadata, columns);
-        this.maxSSTableSizeInBytes = maxSSTableSizeInMiB * 1024L * 1024L;
+        this.maxSStableSizeInBytes = maxSSTableSizeInMiB * 1024L * 1024L;
         this.header = new SerializationHeader(true, metadata.get(), columns, EncodingStats.NO_STATS);
         this.helper = new SerializationHelper(this.header);
         diskWriter.start();
@@ -84,7 +84,7 @@ class SSTableSimpleUnsortedWriter extends AbstractSSTableSimpleWriter
         {
             // todo: inefficient - we create and serialize a PU just to get its size, then recreate it
             // todo: either allow PartitionUpdateBuilder to have .build() called several times or pre-calculate the size
-            currentSize += PartitionUpdate.serializer.serializedSize(createPartitionUpdateBuilder(key).build(), formatType.info.getLatestVersion().correspondingMessagingVersion());
+            currentSize += PartitionUpdate.serializer.serializedSize(createPartitionUpdateBuilder(key).build(), format.getLatestVersion().correspondingMessagingVersion());
             previous = createPartitionUpdateBuilder(key);
             buffer.put(key, previous);
         }
@@ -98,14 +98,14 @@ class SSTableSimpleUnsortedWriter extends AbstractSSTableSimpleWriter
         // improve that. In particular, what we count is closer to the serialized value, but it's debatable that it's the right thing
         // to count since it will take a lot more space in memory and the bufferSize is first and foremost used to avoid OOM when
         // using this writer.
-        currentSize += UnfilteredSerializer.serializer.serializedSize(row, helper, 0, formatType.info.getLatestVersion().correspondingMessagingVersion());
+        currentSize += UnfilteredSerializer.serializer.serializedSize(row, helper, 0, format.getLatestVersion().correspondingMessagingVersion());
     }
 
     private void maybeSync() throws SyncException
     {
         try
         {
-            if (currentSize > maxSSTableSizeInBytes)
+            if (currentSize > maxSStableSizeInBytes)
                 sync();
         }
         catch (IOException e)
@@ -183,7 +183,10 @@ class SSTableSimpleUnsortedWriter extends AbstractSSTableSimpleWriter
             if (diskWriter.exception instanceof IOException)
                 throw (IOException) diskWriter.exception;
             else
-                throw Throwables.propagate(diskWriter.exception);
+            {
+                Throwables.throwIfUnchecked(diskWriter.exception);
+                throw new RuntimeException(diskWriter.exception);
+            }
         }
     }
 
@@ -212,7 +215,7 @@ class SSTableSimpleUnsortedWriter extends AbstractSSTableSimpleWriter
                     if (b == SENTINEL)
                         return;
 
-                        try (SSTableTxnWriter writer = createWriter())
+                    try (SSTableTxnWriter writer = createWriter(null))
                     {
                         for (Map.Entry<DecoratedKey, PartitionUpdate.Builder> entry : b.entrySet())
                             writer.append(entry.getValue().build().unfilteredIterator());

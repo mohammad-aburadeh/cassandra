@@ -24,7 +24,18 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.function.Predicate;
 
-public class ReflectionUtils {
+public class ReflectionUtils
+{
+    private ReflectionUtils()
+    {
+
+    }
+
+    public static Field getModifiersField() throws NoSuchFieldException
+    {
+        return getField(Field.class, "modifiers");
+    }
+
     public static Field getField(Class<?> clazz, String fieldName) throws NoSuchFieldException
     {
         // below code works before Java 12
@@ -80,8 +91,7 @@ public class ReflectionUtils {
                 // This could be done with a simple `map.entrySet.removeIf()` call
                 // but for debugging purposes it is much easier to keep it like this.
                 Iterator<Map.Entry<K,V>> it = map.entrySet().iterator();
-                while (it.hasNext())
-                {
+                while (it.hasNext()) {
                     Map.Entry<K,V> entry = it.next();
                     if (shouldRemove.test(entry))
                     {

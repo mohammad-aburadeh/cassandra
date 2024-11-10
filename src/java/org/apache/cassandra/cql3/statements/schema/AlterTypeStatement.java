@@ -34,6 +34,7 @@ import org.apache.cassandra.schema.KeyspaceMetadata;
 import org.apache.cassandra.schema.Keyspaces;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.ClientState;
+import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.transport.Event.SchemaChange;
 import org.apache.cassandra.transport.Event.SchemaChange.Change;
 import org.apache.cassandra.transport.Event.SchemaChange.Target;
@@ -69,8 +70,10 @@ public abstract class AlterTypeStatement extends AlterSchemaStatement
         return new SchemaChange(Change.UPDATED, Target.TYPE, keyspaceName, typeName);
     }
 
-    public Keyspaces apply(Keyspaces schema)
+    @Override
+    public Keyspaces apply(ClusterMetadata metadata)
     {
+        Keyspaces schema = metadata.schema.getKeyspaces();
         KeyspaceMetadata keyspace = schema.getNullable(keyspaceName);
 
         UserType type = null == keyspace
@@ -153,6 +156,7 @@ public abstract class AlterTypeStatement extends AlterSchemaStatement
             }
 
             Guardrails.fieldsPerUDT.guard(userType.size() + 1, userType.getNameAsString(), false, state);
+            type.validate(state, "Field " + fieldName);
 
             List<FieldIdentifier> fieldNames = new ArrayList<>(userType.fieldNames()); fieldNames.add(fieldName);
             List<AbstractType<?>> fieldTypes = new ArrayList<>(userType.fieldTypes()); fieldTypes.add(fieldType);
@@ -185,7 +189,7 @@ public abstract class AlterTypeStatement extends AlterSchemaStatement
         UserType apply(KeyspaceMetadata keyspace, UserType userType)
         {
             List<String> dependentAggregates =
-                keyspace.functions
+                keyspace.userFunctions
                         .udas()
                         .filter(uda -> null != uda.initialCondition() && uda.stateType().referencesUserType(userType.name))
                         .map(uda -> uda.name().toString())

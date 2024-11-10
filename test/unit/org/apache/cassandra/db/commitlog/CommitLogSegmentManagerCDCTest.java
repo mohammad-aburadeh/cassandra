@@ -26,7 +26,8 @@ import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 
-import com.google.monitoring.runtime.instrumentation.common.util.concurrent.Uninterruptibles;
+import com.google.common.util.concurrent.Uninterruptibles;
+import org.apache.cassandra.ServerTestUtils;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileReader;
 import org.junit.Assert;
@@ -47,9 +48,11 @@ public class CommitLogSegmentManagerCDCTest extends CQLTester
 {
     private static final Random random = new Random();
 
+    // shadow CQLTester#setUpClass
     @BeforeClass
     public static void setUpClass()
     {
+        ServerTestUtils.daemonInitialization();
         DatabaseDescriptor.setCDCEnabled(true);
         DatabaseDescriptor.setCDCTotalSpaceInMiB(1024);
         CQLTester.setUpClass();

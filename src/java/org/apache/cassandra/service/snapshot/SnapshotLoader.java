@@ -73,6 +73,11 @@ public class SnapshotLoader
         this.dataDirectories = dataDirs;
     }
 
+    public SnapshotLoader(Directories directories)
+    {
+        this(directories.getCFDirectories().stream().map(File::toPath).collect(Collectors.toList()));
+    }
+
     @VisibleForTesting
     static class Visitor extends SimpleFileVisitor<Path>
     {
@@ -108,7 +113,7 @@ public class SnapshotLoader
 
             if (subdir.getParent().getFileName().toString().equals(SNAPSHOT_SUBDIR))
             {
-                logger.trace("Processing directory " + subdir);
+                logger.trace("Processing directory {}", subdir);
                 Matcher snapshotDirMatcher = SNAPSHOT_DIR_PATTERN.matcher(subdir.toString());
                 if (snapshotDirMatcher.find())
                 {
@@ -152,17 +157,24 @@ public class SnapshotLoader
         }
     }
 
-    public Set<TableSnapshot> loadSnapshots()
+    public Set<TableSnapshot> loadSnapshots(String keyspace)
     {
+        // if we supply a keyspace, the walking max depth will be suddenly shorther
+        // because we are one level down in the directory structure
+        int maxDepth = keyspace == null ? 5 : 4;
+
         Map<String, TableSnapshot.Builder> snapshots = new HashMap<>();
         Visitor visitor = new Visitor(snapshots);
 
         for (Path dataDir : dataDirectories)
         {
+            if (keyspace != null)
+                dataDir = dataDir.resolve(keyspace);
+
             try
             {
                 if (new File(dataDir).exists())
-                    Files.walkFileTree(dataDir, Collections.emptySet(), 5, visitor);
+                    Files.walkFileTree(dataDir, Collections.emptySet(), maxDepth, visitor);
                 else
                     logger.debug("Skipping non-existing data directory {}", dataDir);
             }
@@ -173,5 +185,10 @@ public class SnapshotLoader
         }
 
         return snapshots.values().stream().map(TableSnapshot.Builder::build).collect(Collectors.toSet());
+    }
+
+    public Set<TableSnapshot> loadSnapshots()
+    {
+        return loadSnapshots(null);
     }
 }

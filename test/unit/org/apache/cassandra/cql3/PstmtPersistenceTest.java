@@ -40,7 +40,8 @@ import org.apache.cassandra.utils.MD5Digest;
 
 import static java.util.Collections.emptyMap;
 import static org.apache.cassandra.service.QueryState.forInternalCalls;
-import static org.junit.Assert.*;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.fail;
 
 public class PstmtPersistenceTest extends CQLTester
 {

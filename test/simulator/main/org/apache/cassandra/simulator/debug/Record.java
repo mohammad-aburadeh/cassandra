@@ -41,6 +41,7 @@ import org.apache.cassandra.io.util.DataOutputStreamPlus;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.simulator.ClusterSimulation;
 import org.apache.cassandra.simulator.RandomSource;
+import org.apache.cassandra.simulator.Simulation;
 import org.apache.cassandra.simulator.SimulationRunner.RecordOption;
 import org.apache.cassandra.simulator.systems.SimulatedTime;
 import org.apache.cassandra.utils.Closeable;
@@ -156,9 +157,10 @@ public class Record
             flusher.setDaemon(true);
             flusher.start();
 
-            try (ClusterSimulation<?> cluster = builder.create(seed))
+            try (ClusterSimulation<?> clusterSimulation = builder.create(seed))
             {
-                try (CloseableIterator<?> iter = cluster.simulation.iterator();)
+                try (Simulation simulation = clusterSimulation.simulation();
+                     CloseableIterator<?> iter = simulation.iterator())
                 {
                     while (iter.hasNext())
                         eventOut.println(normaliseRecordingOut(iter.next().toString()));
@@ -282,7 +284,7 @@ public class Record
                 synchronized (this)
                 {
                     out.writeByte(7);
-                    out.writeVInt(count++);
+                    out.writeVInt32(count++);
                     out.writeLong(value);
                     threads.writeThread();
                 }
@@ -309,11 +311,11 @@ public class Record
                 synchronized (this)
                 {
                     out.writeByte(1);
-                    out.writeVInt(count++);
+                    out.writeVInt32(count++);
                     threads.writeThread();
-                    out.writeVInt(min);
-                    out.writeVInt(max - min);
-                    out.writeVInt(v - min);
+                    out.writeVInt32(min);
+                    out.writeVInt32(max - min);
+                    out.writeVInt32(v - min);
                 }
             }
             catch (IOException e)
@@ -339,7 +341,7 @@ public class Record
                 synchronized (this)
                 {
                     out.writeByte(2);
-                    out.writeVInt(count++);
+                    out.writeVInt32(count++);
                     threads.writeThread();
                     out.writeVInt(min);
                     out.writeVInt(max - min);
@@ -369,7 +371,7 @@ public class Record
                 synchronized (this)
                 {
                     out.writeByte(3);
-                    out.writeVInt(count++);
+                    out.writeVInt32(count++);
                     threads.writeThread();
                     out.writeFloat(v);
                 }
@@ -397,7 +399,7 @@ public class Record
                 synchronized (this)
                 {
                     out.writeByte(6);
-                    out.writeVInt(count++);
+                    out.writeVInt32(count++);
                     threads.writeThread();
                     out.writeDouble(v);
                 }
@@ -425,7 +427,7 @@ public class Record
                 synchronized (this)
                 {
                     out.writeByte(4);
-                    out.writeVInt(count++);
+                    out.writeVInt32(count++);
                     out.writeVInt(seed);
                 }
             }
@@ -451,7 +453,7 @@ public class Record
                 synchronized (this)
                 {
                     out.writeByte(5);
-                    out.writeVInt(count++);
+                    out.writeVInt32(count++);
                     out.writeFloat(v);
                 }
             }
@@ -514,11 +516,11 @@ public class Record
             Integer id = objects.get(o);
             if (id != null)
             {
-                out.writeVInt(id);
+                out.writeVInt32(id);
             }
             else
             {
-                out.writeVInt(objects.size());
+                out.writeVInt32(objects.size());
                 out.writeUTF(o.toString());
                 objects.put(o, objects.size());
             }

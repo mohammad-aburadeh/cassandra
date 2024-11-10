@@ -87,7 +87,7 @@ public class BatchStatementBench
     static String keyspace = "keyspace1";
     String table = "tbl";
 
-    int nowInSec = FBUtilities.nowInSeconds();
+    long nowInSec = FBUtilities.nowInSeconds();
     Dispatcher.RequestTime queryStartTime = Dispatcher.RequestTime.forImmediateExecution();
     BatchStatement bs;
     BatchQueryOptions bqo;

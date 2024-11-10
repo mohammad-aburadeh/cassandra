@@ -17,28 +17,21 @@
  */
 package org.apache.cassandra.service.paxos.v1;
 
-import org.apache.cassandra.transport.Dispatcher;
-import org.apache.cassandra.utils.Clock;
-import org.apache.cassandra.utils.concurrent.CountDownLatch;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.WriteType;
-import org.apache.cassandra.exceptions.RequestFailureReason;
 import org.apache.cassandra.exceptions.WriteTimeoutException;
-import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.net.RequestCallback;
+import org.apache.cassandra.transport.Dispatcher;
 import org.apache.cassandra.utils.concurrent.UncheckedInterruptedException;
+import org.apache.cassandra.utils.Clock;
+import org.apache.cassandra.utils.concurrent.CountDownLatch;
 
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static org.apache.cassandra.utils.concurrent.CountDownLatch.newCountDownLatch;
 
 public abstract class AbstractPaxosCallback<T> implements RequestCallback<T>
 {
-    private static final Logger logger = LoggerFactory.getLogger(AbstractPaxosCallback.class);
     protected final CountDownLatch latch;
     protected final int targets;
     private final ConsistencyLevel consistency;
@@ -71,17 +64,5 @@ public abstract class AbstractPaxosCallback<T> implements RequestCallback<T>
         {
             throw new UncheckedInterruptedException(e);
         }
-    }
-
-    @Override
-    public void onFailure(InetAddressAndPort from, RequestFailureReason failureReason)
-    {
-        logger.debug("Received paxos propose/prepare failure response from {} reason {}", from, failureReason);
-    }
-
-    @Override
-    public boolean invokeOnFailure()
-    {
-        return true;
     }
 }

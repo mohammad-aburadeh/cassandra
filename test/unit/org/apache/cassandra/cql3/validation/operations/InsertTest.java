@@ -18,6 +18,8 @@
 
 package org.apache.cassandra.cql3.validation.operations;
 
+import java.nio.ByteBuffer;
+
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -28,7 +30,7 @@ import org.apache.cassandra.cql3.UntypedResultSet;
 import org.apache.cassandra.cql3.UntypedResultSet.Row;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 
-public class InsertTest extends CQLTester
+public class InsertTest extends CQLTester.Fuzzed
 {
     @Test
     public void testInsertZeroDuration() throws Throwable
@@ -68,6 +70,15 @@ public class InsertTest extends CQLTester
     }
 
     @Test
+    public void testEmptyTTL() throws Throwable
+    {
+        createTable("CREATE TABLE %s (k int PRIMARY KEY, v int)");
+        execute("INSERT INTO %s (k, v) VALUES (0, 0) USING TTL ?", (Object) null);
+        execute("INSERT INTO %s (k, v) VALUES (1, 1) USING TTL ?", ByteBuffer.wrap(new byte[0]));
+        assertRowsIgnoringOrder(execute("SELECT k, v, ttl(v) FROM %s"), row(1, 1, null), row(0, 0, null));
+    }
+
+    @Test
     public void testInsertWithUnset() throws Throwable
     {
         createTable("CREATE TABLE %s (k int PRIMARY KEY, s text, i int)");
@@ -87,7 +98,7 @@ public class InsertTest extends CQLTester
 
         assertInvalidMessage("Invalid unset value for column k", "UPDATE %s SET i = 0 WHERE k = ?", unset());
         assertInvalidMessage("Invalid unset value for column k", "DELETE FROM %s WHERE k = ?", unset());
-        assertInvalidMessage("Invalid unset value for argument in call to function blobasint", "SELECT * FROM %s WHERE k = blobAsInt(?)", unset());
+        assertInvalidMessage("Invalid unset value for argument in call to function blob_as_int", "SELECT * FROM %s WHERE k = blob_as_int(?)", unset());
     }
 
     @Test
@@ -220,13 +231,13 @@ public class InsertTest extends CQLTester
         execute("INSERT INTO %s (partitionKey, staticValue) VALUES (1, 'B')");
         flush(forceFlush);
 
-        assertRows(execute("SELECT * FROM %s"),
+        assertRowsIgnoringOrder(execute("SELECT * FROM %s"),
                    row(1, null, null, "B", null),
                    row(0, 0, 0, "A", null));
 
         execute("INSERT INTO %s (partitionKey, clustering_1, clustering_2, value) VALUES (1, 0, 0, 0)");
         flush(forceFlush);
-        assertRows(execute("SELECT * FROM %s"),
+        assertRowsIgnoringOrder(execute("SELECT * FROM %s"),
                    row(1, 0, 0, "B", 0),
                    row(0, 0, 0, "A", null));
 

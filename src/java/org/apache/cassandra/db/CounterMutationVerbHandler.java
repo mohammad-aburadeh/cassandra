@@ -33,7 +33,6 @@ public class CounterMutationVerbHandler extends AbstractMutationVerbHandler<Coun
 
     private static final Logger logger = LoggerFactory.getLogger(CounterMutationVerbHandler.class);
 
-    @Override
     protected void applyMutation(final Message<CounterMutation> message, InetAddressAndPort respondToAddress)
     {
         final CounterMutation cm = message.payload;

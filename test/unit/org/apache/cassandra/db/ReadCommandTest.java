@@ -56,6 +56,7 @@ import org.apache.cassandra.db.rows.UnfilteredRowIterators;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.exceptions.ConfigurationException;
+import org.apache.cassandra.exceptions.QueryCancelledException;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.util.DataInputBuffer;
 import org.apache.cassandra.io.util.DataOutputBuffer;
@@ -232,7 +233,16 @@ public class ReadCommandTest
         assertEquals(2, Util.getAll(readCommand).size());
 
         readCommand.abort();
-        assertEquals(0, Util.getAll(readCommand).size());
+        boolean cancelled = false;
+        try
+        {
+            Util.getAll(readCommand);
+        }
+        catch (QueryCancelledException e)
+        {
+            cancelled = true;
+        }
+        assertTrue(cancelled);
     }
 
     @Test
@@ -263,7 +273,16 @@ public class ReadCommandTest
         assertEquals(2, partitions.get(0).rowCount());
 
         readCommand.abort();
-        assertEquals(0, Util.getAll(readCommand).size());
+        boolean cancelled = false;
+        try
+        {
+            Util.getAll(readCommand);
+        }
+        catch (QueryCancelledException e)
+        {
+            cancelled = true;
+        }
+        assertTrue(cancelled);
     }
 
     @Test
@@ -294,7 +313,16 @@ public class ReadCommandTest
         assertEquals(2, partitions.get(0).rowCount());
 
         readCommand.abort();
-        assertEquals(0, Util.getAll(readCommand).size());
+        boolean cancelled = false;
+        try
+        {
+            Util.getAll(readCommand);
+        }
+        catch (QueryCancelledException e)
+        {
+            cancelled = true;
+        }
+        assertTrue(cancelled);
     }
 
     @Test
@@ -329,9 +357,9 @@ public class ReadCommandTest
         String[] expectedRows = new String[] { "aa", "ff", "ee", "cc", "dd", "cc", "bb"};
 
         List<ByteBuffer> buffers = new ArrayList<>(groups.length);
-        int nowInSeconds = FBUtilities.nowInSeconds();
+        long nowInSeconds = FBUtilities.nowInSeconds();
         ColumnFilter columnFilter = ColumnFilter.allRegularColumnsBuilder(cfs.metadata(), false).build();
-        RowFilter rowFilter = RowFilter.create();
+        RowFilter rowFilter = RowFilter.create(true);
         Slice slice = Slice.make(BufferClusteringBound.BOTTOM, BufferClusteringBound.TOP);
         ClusteringIndexSliceFilter sliceFilter = new ClusteringIndexSliceFilter(Slices.with(cfs.metadata().comparator, slice), false);
 
@@ -496,9 +524,9 @@ public class ReadCommandTest
         };
 
         List<ByteBuffer> buffers = new ArrayList<>(groups.length);
-        int nowInSeconds = FBUtilities.nowInSeconds();
+        long nowInSeconds = FBUtilities.nowInSeconds();
         ColumnFilter columnFilter = ColumnFilter.allRegularColumnsBuilder(cfs.metadata(), false).build();
-        RowFilter rowFilter = RowFilter.create();
+        RowFilter rowFilter = RowFilter.create(true);
         Slice slice = Slice.make(BufferClusteringBound.BOTTOM, BufferClusteringBound.TOP);
         ClusteringIndexSliceFilter sliceFilter = new ClusteringIndexSliceFilter(
                 Slices.with(cfs.metadata().comparator, slice), false);
@@ -572,9 +600,9 @@ public class ReadCommandTest
         };
 
         List<ByteBuffer> buffers = new ArrayList<>(groups.length);
-        int nowInSeconds = FBUtilities.nowInSeconds();
+        long nowInSeconds = FBUtilities.nowInSeconds();
         ColumnFilter columnFilter = ColumnFilter.allRegularColumnsBuilder(cfs.metadata(), false).build();
-        RowFilter rowFilter = RowFilter.create();
+        RowFilter rowFilter = RowFilter.create(true);
         Slice slice = Slice.make(BufferClusteringBound.BOTTOM, BufferClusteringBound.TOP);
         ClusteringIndexSliceFilter sliceFilter = new ClusteringIndexSliceFilter(
                 Slices.with(cfs.metadata().comparator, slice), false);
@@ -767,7 +795,7 @@ public class ReadCommandTest
         setGCGrace(cfs, 600);
 
         DecoratedKey[] keys = new DecoratedKey[] { Util.dk("key0"), Util.dk("key1"), Util.dk("key2"), Util.dk("key3") };
-        int nowInSec = FBUtilities.nowInSeconds();
+        long nowInSec = FBUtilities.nowInSeconds();
 
         // A simple tombstone
         new RowUpdateBuilder(cfs.metadata(), 0, keys[0]).clustering("cc").delete("a").build().apply();
@@ -903,7 +931,10 @@ public class ReadCommandTest
     {
         TableParams newParams = cfs.metadata().params.unbuild().gcGraceSeconds(gcGrace).build();
         KeyspaceMetadata keyspaceMetadata = Schema.instance.getKeyspaceMetadata(cfs.metadata().keyspace);
-        SchemaTestUtil.addOrUpdateKeyspace(keyspaceMetadata.withSwapped(keyspaceMetadata.tables.withSwapped(cfs.metadata().withSwapped(newParams))), true);
+        SchemaTestUtil.addOrUpdateKeyspace(
+            keyspaceMetadata.withSwapped(
+                keyspaceMetadata.tables.withSwapped(
+                    cfs.metadata().withSwapped(newParams))), true);
     }
 
     private long getAndResetOverreadCount(ColumnFamilyStore cfs)
@@ -1087,7 +1118,7 @@ public class ReadCommandTest
         new RowUpdateBuilder(cfs.metadata(), 1, key).clustering("cc").add("a", ByteBufferUtil.bytes("a")).build().apply();
         Util.flush(cfs);
 
-        int nowInSec = FBUtilities.nowInSeconds() + 10;
+        long nowInSec = FBUtilities.nowInSeconds() + 10;
         ReadCommand cmd = Util.cmd(cfs, key).withNowInSeconds(nowInSec).build();
 
         try (ReadExecutionController controller = cmd.executionController(true))
@@ -1304,14 +1335,14 @@ public class ReadCommandTest
             // check for sessions which have exceeded timeout and been purged
             Range<Token> range = new Range<>(cfs.metadata().partitioner.getMinimumToken(),
                                              cfs.metadata().partitioner.getRandomToken());
-            ActiveRepairService.instance.registerParentRepairSession(pendingSession,
-                                                                     REPAIR_COORDINATOR,
-                                                                     Lists.newArrayList(cfs),
-                                                                     Sets.newHashSet(range),
-                                                                     true,
-                                                                     repairedAt,
-                                                                     true,
-                                                                     PreviewKind.NONE);
+            ActiveRepairService.instance().registerParentRepairSession(pendingSession,
+                                                                       REPAIR_COORDINATOR,
+                                                                       Lists.newArrayList(cfs),
+                                                                       Sets.newHashSet(range),
+                                                                       true,
+                                                                       repairedAt,
+                                                                       true,
+                                                                       PreviewKind.NONE);
 
             LocalSessionAccessor.prepareUnsafe(pendingSession, null, Sets.newHashSet(REPAIR_COORDINATOR));
         }

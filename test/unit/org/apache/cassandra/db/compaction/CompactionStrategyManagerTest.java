@@ -28,11 +28,14 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import com.google.common.io.Files;
 import org.junit.AfterClass;
+import org.junit.Assert;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -59,6 +62,7 @@ import org.apache.cassandra.notifications.SSTableDeletingNotification;
 import org.apache.cassandra.schema.CompactionParams;
 import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.service.StorageService;
+import org.apache.cassandra.tcm.Epoch;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
 import static org.apache.cassandra.utils.TimeUUID.Generator.nextTimeUUID;
@@ -337,7 +341,7 @@ public class CompactionStrategyManagerTest
     {
         final int numDir = 4;
         ColumnFamilyStore cfs = createJBODMockCFS(numDir);
-        Keyspace.open(cfs.keyspace.getName()).getColumnFamilyStore(cfs.name).disableAutoCompaction();
+        Keyspace.open(cfs.getKeyspaceName()).getColumnFamilyStore(cfs.name).disableAutoCompaction();
         assertTrue(cfs.getLiveSSTables().isEmpty());
         List<SSTableReader> transientRepairs = new ArrayList<>();
         List<SSTableReader> pendingRepair = new ArrayList<>();
@@ -347,10 +351,10 @@ public class CompactionStrategyManagerTest
         for (int i = 0; i < numDir; i++)
         {
             int key = 100 * i;
-            transientRepairs.add(createSSTableWithKey(cfs.keyspace.getName(), cfs.name, key++));
-            pendingRepair.add(createSSTableWithKey(cfs.keyspace.getName(), cfs.name, key++));
-            unrepaired.add(createSSTableWithKey(cfs.keyspace.getName(), cfs.name, key++));
-            repaired.add(createSSTableWithKey(cfs.keyspace.getName(), cfs.name, key++));
+            transientRepairs.add(createSSTableWithKey(cfs.getKeyspaceName(), cfs.name, key++));
+            pendingRepair.add(createSSTableWithKey(cfs.getKeyspaceName(), cfs.name, key++));
+            unrepaired.add(createSSTableWithKey(cfs.getKeyspaceName(), cfs.name, key++));
+            repaired.add(createSSTableWithKey(cfs.getKeyspaceName(), cfs.name, key++));
         }
 
         cfs.getCompactionStrategyManager().mutateRepaired(transientRepairs, 0, nextTimeUUID(), true);
@@ -359,7 +363,7 @@ public class CompactionStrategyManagerTest
 
         DiskBoundaries boundaries = new DiskBoundaries(cfs, cfs.getDirectories().getWriteableLocations(),
                                                        Lists.newArrayList(forKey(100), forKey(200), forKey(300)),
-                                                       10, 10);
+                                                       Epoch.create(10), 10);
 
         CompactionStrategyManager csm = new CompactionStrategyManager(cfs, () -> boundaries, true);
 
@@ -393,6 +397,41 @@ public class CompactionStrategyManagerTest
                 assertSame(expected, sstable);
             }
         }
+    }
+
+    @Test
+    public void testCountsByBuckets()
+    {
+        Assert.assertArrayEquals(
+            new int[] {2, 2, 4},
+            CompactionStrategyManager.sumCountsByBucket(ImmutableList.of(
+                ImmutableMap.of(60000L, 1, 0L, 2, 180000L, 1),
+                ImmutableMap.of(60000L, 1, 0L, 2, 180000L, 1)), CompactionStrategyManager.TWCS_BUCKET_COUNT_MAX));
+        Assert.assertArrayEquals(
+            new int[] {1, 1, 3},
+            CompactionStrategyManager.sumCountsByBucket(ImmutableList.of(
+                ImmutableMap.of(60000L, 1, 0L, 1),
+                ImmutableMap.of(0L, 2, 180000L, 1)), CompactionStrategyManager.TWCS_BUCKET_COUNT_MAX));
+        Assert.assertArrayEquals(
+            new int[] {1, 1},
+            CompactionStrategyManager.sumCountsByBucket(ImmutableList.of(
+                ImmutableMap.of(60000L, 1, 0L, 1),
+                ImmutableMap.of()), CompactionStrategyManager.TWCS_BUCKET_COUNT_MAX));
+        Assert.assertArrayEquals(
+            new int[] {8, 4},
+            CompactionStrategyManager.sumCountsByBucket(ImmutableList.of(
+                ImmutableMap.of(60000L, 2, 0L, 1, 180000L, 4),
+                ImmutableMap.of(60000L, 2, 0L, 1, 180000L, 4)), 2));
+        Assert.assertArrayEquals(
+            new int[] {1, 1, 2},
+            CompactionStrategyManager.sumCountsByBucket(ImmutableList.of(
+                Collections.emptyMap(),
+                ImmutableMap.of(60000L, 1, 0L, 2, 180000L, 1)), CompactionStrategyManager.TWCS_BUCKET_COUNT_MAX));
+        Assert.assertArrayEquals(
+            new int[] {},
+            CompactionStrategyManager.sumCountsByBucket(ImmutableList.of(
+                Collections.emptyMap(),
+                Collections.emptyMap()), CompactionStrategyManager.TWCS_BUCKET_COUNT_MAX));
     }
 
     private MockCFS createJBODMockCFS(int disks)
@@ -457,14 +496,12 @@ public class CompactionStrategyManagerTest
     private int getSSTableIndex(Integer[] boundaries, SSTableReader reader)
     {
         int index = 0;
-        int firstKey = Integer.parseInt(new String(ByteBufferUtil.getArray(reader.first.getKey())));
+        int firstKey = Integer.parseInt(new String(ByteBufferUtil.getArray(reader.getFirst().getKey())));
         while (boundaries[index] <= firstKey)
             index++;
         logger.debug("Index for SSTable {} on boundary {} is {}", reader.descriptor.id, Arrays.toString(boundaries), index);
         return index;
     }
-
-
 
     class MockBoundaryManager
     {
@@ -494,7 +531,7 @@ public class CompactionStrategyManagerTest
         private DiskBoundaries createDiskBoundaries(ColumnFamilyStore cfs, Integer[] boundaries)
         {
             List<PartitionPosition> positions = Arrays.stream(boundaries).map(b -> Util.token(String.format(String.format("%04d", b))).minKeyBound()).collect(Collectors.toList());
-            return new DiskBoundaries(cfs, cfs.getDirectories().getWriteableLocations(), positions, 0, 0);
+            return new DiskBoundaries(cfs, cfs.getDirectories().getWriteableLocations(), positions, Epoch.create(0), 0);
         }
     }
 
@@ -519,7 +556,7 @@ public class CompactionStrategyManagerTest
     {
         MockCFS(ColumnFamilyStore cfs, Directories dirs)
         {
-            super(cfs.keyspace, cfs.getTableName(), Util.newSeqGen(), cfs.metadata, dirs, false, false, true);
+            super(cfs.keyspace, cfs.getTableName(), Util.newSeqGen(), cfs.metadata.get(), dirs, false, false);
         }
     }
 
@@ -530,7 +567,7 @@ public class CompactionStrategyManagerTest
 
         private MockCFSForCSM(ColumnFamilyStore cfs, CountDownLatch latch, AtomicInteger upgradeTaskCount)
         {
-            super(cfs.keyspace, cfs.name, Util.newSeqGen(10), cfs.metadata, cfs.getDirectories(), true, false, false);
+            super(cfs.keyspace, cfs.name, Util.newSeqGen(10), cfs.metadata.get(), cfs.getDirectories(), true, false);
             this.latch = latch;
             this.upgradeTaskCount = upgradeTaskCount;
         }

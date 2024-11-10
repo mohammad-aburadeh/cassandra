@@ -28,6 +28,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.concurrent.Stage;
+import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.exceptions.OverloadedException;
 import org.apache.cassandra.locator.InetAddressAndPort;
@@ -50,8 +51,7 @@ public class TraceStateImpl extends TraceState
     private static final Logger logger = LoggerFactory.getLogger(TraceStateImpl.class);
 
     @VisibleForTesting
-    public static int WAIT_FOR_PENDING_EVENTS_TIMEOUT_SECS =
-      Integer.parseInt(System.getProperty("cassandra.wait_for_tracing_events_timeout_secs", "0"));
+    public static int WAIT_FOR_PENDING_EVENTS_TIMEOUT_SECS = CassandraRelevantProperties.WAIT_FOR_TRACING_EVENTS_TIMEOUT_SECS.getInt();
 
     private final Set<Future<?>> pendingFutures = ConcurrentHashMap.newKeySet();
 
@@ -66,8 +66,7 @@ public class TraceStateImpl extends TraceState
         final int elapsed = elapsed();
 
         executeMutation(TraceKeyspace.makeEventMutation(sessionIdBytes, message, elapsed, threadName, ttl));
-        if (logger.isTraceEnabled())
-            logger.trace("Adding <{}> to trace events", message);
+        logger.trace("Adding <{}> to trace events", message);
     }
 
     /**
@@ -89,9 +88,7 @@ public class TraceStateImpl extends TraceState
         }
         catch (TimeoutException ex)
         {
-            if (logger.isTraceEnabled())
-                logger.trace("Failed to wait for tracing events to complete in {} seconds",
-                             WAIT_FOR_PENDING_EVENTS_TIMEOUT_SECS);
+            logger.trace("Failed to wait for tracing events to complete in {} seconds", WAIT_FOR_PENDING_EVENTS_TIMEOUT_SECS);
         }
         catch (Throwable t)
         {

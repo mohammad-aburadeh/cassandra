@@ -33,12 +33,10 @@ public class SoftAssertionsWithLimit extends SoftAssertions
     }
 
     @Override
-    public void collectAssertionError(AssertionError error)
+    public void onAssertionErrorCollected(AssertionError assertionError)
     {
-        int cnt = counter.incrementAndGet();
-        if (cnt < limit)
-            super.collectAssertionError(error);
-        else if (cnt == limit)
-            super.collectAssertionError(new AssertionError("Too many assertion errors, stopping collecting them."));
+        super.onAssertionErrorCollected(assertionError);
+        if (counter.incrementAndGet() >= limit)
+            assertAll();
     }
 }

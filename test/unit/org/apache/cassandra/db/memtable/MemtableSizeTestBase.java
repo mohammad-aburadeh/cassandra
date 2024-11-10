@@ -26,6 +26,7 @@ import org.junit.Assert;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -40,10 +41,20 @@ import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.FBUtilities;
 import org.github.jamm.MemoryMeter;
+import org.github.jamm.MemoryMeter.Guess;
 
+// Note: This test can be run in idea with the allocation type configured in the test yaml and memtable using the
+// value memtableClass is initialized with.
 @RunWith(Parameterized.class)
 public abstract class MemtableSizeTestBase extends CQLTester
 {
+    // Note: To see a printout of the usage for each object, add .printVisitedTree() here (most useful with smaller number of
+    // partitions).
+    static MemoryMeter meter =  MemoryMeter.builder()
+                                           .withGuessing(Guess.INSTRUMENTATION_AND_SPECIFICATION,
+                                                         Guess.UNSAFE)
+//                                           .printVisitedTreeUpTo(1000)
+                                           .build();
 
     static final Logger logger = LoggerFactory.getLogger(MemtableSizeTestBase.class);
 
@@ -53,6 +64,8 @@ public abstract class MemtableSizeTestBase extends CQLTester
     static final int deletedPartitions = 10_000;
     static final int deletedRows = 5_000;
 
+    static final int totalPartitions = partitions + deletedPartitions + deletedRows;
+
     @Parameterized.Parameter(0)
     public String memtableClass = "skiplist";
 
@@ -60,15 +73,15 @@ public abstract class MemtableSizeTestBase extends CQLTester
     public static List<Object> parameters()
     {
         return ImmutableList.of("skiplist",
-                                "skiplist_sharded");
+                                "skiplist_sharded",
+                                "trie");
     }
-
-    static final int totalPartitions = partitions + deletedPartitions + deletedRows;
 
     // Must be within 3% of the real usage. We are actually more precise than this, but the threshold is set higher to
     // avoid flakes. For on-heap allocators we allow for extra overheads below.
-    // the main contributor to the actual size floating is randomness in ConcurrentSkipListMap
     final int MAX_DIFFERENCE_PERCENT = 3;
+    // Slab overhead, added when the memtable uses heap_buffers.
+    final int SLAB_OVERHEAD = 1024 * 1024;
 
     public static void setup(Config.MemtableAllocationType allocationType, IPartitioner partitioner)
     {
@@ -99,29 +112,11 @@ public abstract class MemtableSizeTestBase extends CQLTester
     @Test
     public void testSize() throws Throwable
     {
-        // Note: To see a printout of the usage for each object, add .enableDebug() here (most useful with smaller number of
-        // partitions)
-        MemoryMeter meter = new MemoryMeter().withGuessing(MemoryMeter.Guess.FALLBACK_UNSAFE)
-//                                           .enableDebug(100)
-                                             .ignoreKnownSingletons();
-        if (DatabaseDescriptor.getMemtableAllocationType() == Config.MemtableAllocationType.heap_buffers ||
-            DatabaseDescriptor.getMemtableAllocationType() == Config.MemtableAllocationType.offheap_buffers)
-        {
-            // jamm includes capacity for all ByteBuffer sub-clases (HeapByteBuffer and DirectByteBuffer) to deepMeasure result
-            // we need it only when we use HeapByteBuffer because we want to measure heap usage only
-            // we have to use it for DirectByteBuffer too to avoid MemoryMeter traversing through Cleaner references
-            meter = meter.omitSharedBufferOverhead();
-        }
-
         // Make sure memtables use the correct allocation type, i.e. that setup has worked.
         // If this fails, make sure the test is not reusing an already-initialized JVM.
         checkMemtablePool();
 
-        // a prepared statement provides the same RegularAndStaticColumns object to store under AbstractBTreePartition$Holder
-        // meter.mesureDeep counts such shared object only once but the current tracking logic within memtable cannot do it
-        // so to not face the discrepancy we disable prepared statements
         CQLTester.disablePreparedReuseForTest();
-
         String keyspace = createKeyspace("CREATE KEYSPACE %s with replication = { 'class' : 'SimpleStrategy', 'replication_factor' : 1 } and durable_writes = false");
         try
         {
@@ -181,20 +176,18 @@ public abstract class MemtableSizeTestBase extends CQLTester
             logger.info("Memtable deep size {}", FBUtilities.prettyPrintMemory(deepSizeAfter));
 
             long expectedHeap = deepSizeAfter - deepSizeBefore;
-            // jamm MemoryMeter 0.3.2 does not allow to measure heap usage for DirectHeapBuffer correctly
-            //   within a bigger object graph (measureDeep).
-            // If omitSharedBufferOverhead is disabled
-            //    it starts to traverse and include heap usage for unpredictable global Cleaner/ReferenceQueue graphs
-            // if omitSharedBufferOverhead is enabled
-            //    it includes direct buffer capacity into the memory usage
-            // so, we have to correct the heap usage measured in the test by subtracting the total size of data within DirectByteBuffer.
-            // We assume that there is no data replacement in the test operations
-            // so all the off-heap memory allocated in direct byte buffer slabs is in-use/visible by traversing Memtable object graph
-            if (DatabaseDescriptor.getMemtableAllocationType() == Config.MemtableAllocationType.offheap_buffers)
-                expectedHeap -= usage.ownsOffHeap;
-
-            long maxDifference = MAX_DIFFERENCE_PERCENT * expectedHeap / 100;
-
+            long max_difference = MAX_DIFFERENCE_PERCENT * expectedHeap / 100;
+            long trie_overhead = memtable instanceof TrieMemtable ? ((TrieMemtable) memtable).unusedReservedMemory() : 0;
+            switch (DatabaseDescriptor.getMemtableAllocationType())
+            {
+                case heap_buffers:
+                    max_difference += SLAB_OVERHEAD;
+                    actualHeap += trie_overhead;    // adjust trie memory with unused buffer space if on-heap
+                    break;
+                case unslabbed_heap_buffers:
+                    actualHeap += trie_overhead;    // adjust trie memory with unused buffer space if on-heap
+                    break;
+            }
             double deltaPerPartition = (expectedHeap - actualHeap) / (double) totalPartitions;
             String message = String.format("Expected heap usage close to %s, got %s, %s difference. " +
                                            "Delta per partition: %.2f bytes",
@@ -204,7 +197,7 @@ public abstract class MemtableSizeTestBase extends CQLTester
                                            deltaPerPartition);
             logger.info(message);
 
-            Assert.assertTrue(message, Math.abs(actualHeap - expectedHeap) <= maxDifference);
+            Assert.assertTrue(message, Math.abs(actualHeap - expectedHeap) <= max_difference);
         }
         finally
         {

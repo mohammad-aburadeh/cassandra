@@ -28,6 +28,7 @@ import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
+import org.apache.cassandra.locator.MetaStrategy;
 import org.apache.cassandra.streaming.PreviewKind;
 import org.apache.cassandra.repair.RepairParallelism;
 
@@ -202,7 +203,9 @@ public class RepairOption
         }
 
         // ranges
-        Set<Range<Token>> ranges = parseRanges(options.get(RANGES_KEY), partitioner);
+        Set<Range<Token>> ranges = partitioner == MetaStrategy.partitioner
+                                   ? Collections.singleton(MetaStrategy.entireRange)
+                                   : parseRanges(options.get(RANGES_KEY), partitioner);
 
         boolean asymmetricSyncing = Boolean.parseBoolean(options.get(OPTIMISE_STREAMS_KEY));
 
@@ -395,22 +398,20 @@ public class RepairOption
 
     public boolean optimiseStreams()
     {
-        if(optimiseStreams)
-            return true;
-
-        if (isPullRepair() || isForcedRepair())
+        if (isPullRepair())
             return false;
 
-        if (isIncremental() && DatabaseDescriptor.autoOptimiseIncRepairStreams())
+        if (isPreview())
+        {
+            if (DatabaseDescriptor.autoOptimisePreviewRepairStreams())
+                return true;
+        }
+        else if (isIncremental() && DatabaseDescriptor.autoOptimiseIncRepairStreams())
+            return true;
+        else if (!isIncremental() && DatabaseDescriptor.autoOptimiseFullRepairStreams())
             return true;
 
-        if (isPreview() && DatabaseDescriptor.autoOptimisePreviewRepairStreams())
-            return true;
-
-        if (!isIncremental() && DatabaseDescriptor.autoOptimiseFullRepairStreams())
-            return true;
-
-        return false;
+        return optimiseStreams;
     }
 
     public boolean ignoreUnreplicatedKeyspaces()

@@ -27,7 +27,6 @@ import com.google.common.annotations.VisibleForTesting;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.metrics.StorageMetrics;
 
@@ -35,7 +34,12 @@ public final class OwnedRanges
 {
     private static final Logger logger = LoggerFactory.getLogger(OwnedRanges.class);
 
-    private static final Comparator<Range<Token>> rangeComparator = Comparator.comparing((Range<Token> r) -> r.left).thenComparing(r -> r.right);
+    private static final Comparator<Range<Token>> rangeComparator = (r1, r2) ->
+    {
+        int cmp = r1.left.compareTo(r2.left);
+
+        return cmp == 0 ? r1.right.compareTo(r2.right) : cmp;
+    };
 
     // the set of token ranges that this node is a replica for
     private final List<Range<Token>> ownedRanges;
@@ -52,47 +56,43 @@ public final class OwnedRanges
      * the ranges owned by the local node. There are 2 levels of response if invalid ranges are detected, controlled
      * by options in Config; logging the event and rejecting the request and either/neither/both of these options may be
      * enabled. If neither are enabled, we short ciruit and immediately return success without any further processing.
-     * If either option is enabled, and we do detect unowned ranges in the request, we increment a metric then take further
+     * If either option is enabled and we do detect unowned ranges in the request, we increment a metric then take further
      * action depending on the config.
      *
      * @param requestedRanges the set of token ranges contained in a request from a peer
      * @param requestId an identifier for the peer request, to be used in logging (e.g. Stream or Repair Session #)
      * @param requestType description of the request type, to be used in logging (e.g. "prepare request" or "validation")
      * @param from the originator of the request
-     *             
-     * @return true if the request should be accepted (either because no checking was performed, invalid ranges were 
-     *         identified but only the logging action is enabled, or because all request ranges were valid).
-     *         Otherwise, returns false to indicate the request should be rejected.
+     * @return true if the request should be accepted (either because no checking was performed, invalid ranges were d
+     *         identified but only the logging action is enabled, or because all request ranges were valid. Otherwise,
+     *         returns false to indicate the request should be rejected.
      */
     public boolean validateRangeRequest(Collection<Range<Token>> requestedRanges, String requestId, String requestType, InetAddressAndPort from)
     {
-        boolean outOfRangeTokenLogging = DatabaseDescriptor.getLogOutOfTokenRangeRequests();
-        boolean outOfRangeTokenRejection = DatabaseDescriptor.getRejectOutOfTokenRangeRequests();
-
         Collection<Range<Token>> unownedRanges = testRanges(requestedRanges);
 
         if (!unownedRanges.isEmpty())
         {
             StorageMetrics.totalOpsForInvalidToken.inc();
-
-            if (outOfRangeTokenLogging)
-            {
-                logger.warn("[{}] Received {} from {} containing ranges {} outside valid ranges {}",
-                            requestId, requestType, from, unownedRanges, ownedRanges);
-            }
+            logger.warn("[{}] Received {} from {} containing ranges {} outside valid ranges {}",
+                        requestId,
+                        requestType,
+                        from,
+                        unownedRanges,
+                        ownedRanges);
+            return false;
         }
-
-        return !outOfRangeTokenRejection || unownedRanges.isEmpty();
+        return true;
     }
 
     /**
-     * Takes a collection of ranges and returns ranges from that collection that are not covered by this node's owned ranges.
-     * <p>
+     * Takes a collection of ranges and returns ranges from that collection that are not covered by the this node's owned ranges.
+     *
      * This normalizes the range collections internally, so:
      * a) be cautious about using this in any hot path
      * b) any returned ranges may not be identical to those present. That is, the returned values are post-normalization.
-     * <p>
-     * e.g. Given two collections:
+     *
+     * e.g Given two collections:
      *      { (0, 100], (100, 200] }
      *      { (90, 100], (100, 110], (110, 300] }
      * the normalized forms are:
@@ -117,7 +117,7 @@ public final class OwnedRanges
             // Find the point at which the target range would insert into the superset
             int index = Collections.binarySearch(ownedRanges, requested, rangeComparator);
 
-            // an index >= 0 means an exact match was found, so we can definitely accept this range
+            // an index >= 0 means an exact match was found so we can definitely accept this range
             if (index >= 0)
                 return false;
 

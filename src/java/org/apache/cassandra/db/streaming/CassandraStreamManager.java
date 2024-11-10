@@ -30,6 +30,7 @@ import org.apache.cassandra.db.lifecycle.View;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.io.sstable.metadata.StatsMetadata;
 import org.apache.cassandra.locator.RangesAtEndpoint;
 import org.apache.cassandra.locator.Replica;
 import org.apache.cassandra.service.ActiveRepairService;
@@ -81,7 +82,6 @@ public class CassandraStreamManager implements TableStreamManager
         return new CassandraStreamReceiver(cfs, session, totalStreams);
     }
 
-    @SuppressWarnings("resource")   // references placed onto returned collection or closed on error
     @Override
     public Collection<OutgoingStream> createOutgoingStreams(StreamSession session, RangesAtEndpoint replicas, TimeUUID pendingRepair, PreviewKind previewKind)
     {
@@ -105,7 +105,10 @@ public class CassandraStreamManager implements TableStreamManager
                 }
                 else
                 {
-                    predicate = s -> s.isPendingRepair() && s.getSSTableMetadata().pendingRepair.equals(pendingRepair);
+                    predicate = s -> {
+                        StatsMetadata sstableMetadata = s.getSSTableMetadata();
+                        return sstableMetadata.pendingRepair != ActiveRepairService.NO_PENDING_REPAIR && sstableMetadata.pendingRepair.equals(pendingRepair);
+                    };
                 }
 
                 for (Range<PartitionPosition> keyRange : keyRanges)

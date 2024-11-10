@@ -20,8 +20,9 @@ package org.apache.cassandra.io.sstable;
 import java.util.Collection;
 import java.util.Collections;
 
-import org.apache.cassandra.db.RowIndexEntry;
 import org.apache.cassandra.db.SerializationHeader;
+import org.apache.cassandra.db.commitlog.CommitLogPosition;
+import org.apache.cassandra.db.commitlog.IntervalSet;
 import org.apache.cassandra.db.lifecycle.LifecycleNewTracker;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.index.Index;
@@ -43,15 +44,9 @@ public class SimpleSSTableMultiWriter implements SSTableMultiWriter
         this.writer = writer;
     }
 
-    public boolean append(UnfilteredRowIterator partition)
+    public void append(UnfilteredRowIterator partition)
     {
-        RowIndexEntry<?> indexEntry = writer.append(partition);
-        return indexEntry != null;
-    }
-
-    public Collection<SSTableReader> finish(long repairedAt, long maxDataAge, boolean openResult)
-    {
-        return Collections.singleton(writer.finish(repairedAt, maxDataAge, openResult));
+        writer.append(partition);
     }
 
     public Collection<SSTableReader> finish(boolean openResult)
@@ -75,12 +70,11 @@ public class SimpleSSTableMultiWriter implements SSTableMultiWriter
         return writer.getFilename();
     }
 
-    public long getFilePointer()
+    public long getBytesWritten()
     {
         return writer.getFilePointer();
     }
 
-    @Override
     public long getOnDiskBytesWritten()
     {
         return writer.getEstimatedOnDiskBytesWritten();
@@ -112,19 +106,33 @@ public class SimpleSSTableMultiWriter implements SSTableMultiWriter
         writer.close();
     }
 
-    @SuppressWarnings("resource") // SimpleSSTableMultiWriter closes writer
     public static SSTableMultiWriter create(Descriptor descriptor,
                                             long keyCount,
                                             long repairedAt,
                                             TimeUUID pendingRepair,
                                             boolean isTransient,
                                             TableMetadataRef metadata,
-                                            MetadataCollector metadataCollector,
+                                            IntervalSet<CommitLogPosition> commitLogPositions,
+                                            int sstableLevel,
                                             SerializationHeader header,
-                                            Collection<Index> indexes,
-                                            LifecycleNewTracker lifecycleNewTracker)
+                                            Collection<Index.Group> indexGroups,
+                                            LifecycleNewTracker lifecycleNewTracker,
+                                            SSTable.Owner owner)
     {
-        SSTableWriter writer = SSTableWriter.create(descriptor, keyCount, repairedAt, pendingRepair, isTransient, metadata, metadataCollector, header, indexes, lifecycleNewTracker);
+        MetadataCollector metadataCollector = new MetadataCollector(metadata.get().comparator)
+                                              .commitLogIntervals(commitLogPositions != null ? commitLogPositions : IntervalSet.empty())
+                                              .sstableLevel(sstableLevel);
+        SSTableWriter writer = descriptor.getFormat().getWriterFactory().builder(descriptor)
+                                            .setKeyCount(keyCount)
+                                            .setRepairedAt(repairedAt)
+                                            .setPendingRepair(pendingRepair)
+                                            .setTransientSSTable(isTransient)
+                                            .setTableMetadataRef(metadata)
+                                            .setMetadataCollector(metadataCollector)
+                                            .setSerializationHeader(header)
+                                            .addDefaultComponents(indexGroups)
+                                            .setSecondaryIndexGroups(indexGroups)
+                                            .build(lifecycleNewTracker, owner);
         return new SimpleSSTableMultiWriter(writer, lifecycleNewTracker);
     }
 }

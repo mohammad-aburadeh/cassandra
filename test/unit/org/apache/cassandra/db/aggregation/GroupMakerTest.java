@@ -20,13 +20,14 @@ package org.apache.cassandra.db.aggregation;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 
 import org.junit.BeforeClass;
 import org.junit.Test;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.ColumnIdentifier;
-import org.apache.cassandra.cql3.Constants.Literal;
+import org.apache.cassandra.cql3.terms.Constants.Literal;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.cql3.VariableSpecifications;
 import org.apache.cassandra.cql3.functions.ScalarFunction;
@@ -327,6 +328,6 @@ public class GroupMakerTest
         Selector.Factory factory = selectable.newSelectorFactory(table, null, new ArrayList<>(), VariableSpecifications.empty());
         Selector selector = factory.newInstance(QueryOptions.DEFAULT);
 
-        return GroupMaker.newSelectorGroupMaker(table.comparator, reversed.length, selector);
+        return GroupMaker.newSelectorGroupMaker(table.comparator, reversed.length, selector, Collections.singletonList(column));
     }
 }

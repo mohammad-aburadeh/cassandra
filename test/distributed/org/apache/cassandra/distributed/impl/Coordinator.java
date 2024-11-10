@@ -39,17 +39,13 @@ import org.apache.cassandra.distributed.api.QueryResult;
 import org.apache.cassandra.distributed.api.QueryResults;
 import org.apache.cassandra.distributed.api.SimpleQueryResult;
 import org.apache.cassandra.service.ClientState;
-import org.apache.cassandra.service.ClientWarn;
 import org.apache.cassandra.service.QueryState;
-import org.apache.cassandra.service.reads.thresholds.CoordinatorWarnings;
 import org.apache.cassandra.transport.Dispatcher;
 import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.transport.messages.ResultMessage;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.TimeUUID;
-
-import static org.apache.cassandra.distributed.impl.CoordinatorHelper.toCassandraSerialCL;
 
 public class Coordinator implements ICoordinator
 {
@@ -95,53 +91,9 @@ public class Coordinator implements ICoordinator
 
     public static SimpleQueryResult unsafeExecuteInternal(String query, ConsistencyLevel consistencyLevel, Object[] boundValues)
     {
-        return unsafeExecuteInternal(query, null, consistencyLevel, boundValues);
+        return CoordinatorHelper.unsafeExecuteInternal(query, null, consistencyLevel, boundValues);
     }
 
-    public static SimpleQueryResult unsafeExecuteInternal(String query, ConsistencyLevel serialConsistencyLevel, ConsistencyLevel commitConsistencyLevel, Object[] boundValues)
-    {
-        ClientState clientState = CoordinatorHelper.makeFakeClientState();
-        CQLStatement prepared = QueryProcessor.getStatement(query, clientState);
-        List<ByteBuffer> boundBBValues = new ArrayList<>();
-        for (Object boundValue : boundValues)
-            boundBBValues.add(ByteBufferUtil.objectToBytes(boundValue));
-
-        prepared.validate(QueryState.forInternalCalls().getClientState());
-
-        // Start capturing warnings on this thread. Note that this will implicitly clear out any previous 
-        // warnings as it sets a new State instance on the ThreadLocal.
-        ClientWarn.instance.captureWarnings();
-        CoordinatorWarnings.init();
-        try
-        {
-            ResultMessage res = prepared.execute(QueryState.forInternalCalls(),
-                                   QueryOptions.create(toCassandraCL(commitConsistencyLevel),
-                                                       boundBBValues,
-                                                       false,
-                                                       Integer.MAX_VALUE,
-                                                       null,
-                                                       toCassandraSerialCL(serialConsistencyLevel),
-                                                       ProtocolVersion.CURRENT,
-                                                       null),
-                                   Dispatcher.RequestTime.forImmediateExecution());
-            // Collect warnings reported during the query.
-            CoordinatorWarnings.done();
-            if (res != null)
-                res.setWarnings(ClientWarn.instance.getWarnings());
-
-            return RowUtil.toQueryResult(res);
-        }
-        catch (Exception | Error e)
-        {
-            CoordinatorWarnings.done();
-            throw e;
-        }
-        finally
-        {
-            CoordinatorWarnings.reset();
-            ClientWarn.instance.resetWarnings();
-        }
-    }
 
     public Object[][] executeWithTracing(UUID sessionId, String query, ConsistencyLevel consistencyLevelOrigin, Object... boundValues)
     {

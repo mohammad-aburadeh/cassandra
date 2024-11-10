@@ -21,26 +21,23 @@ package org.apache.cassandra.db;
 import java.nio.ByteBuffer;
 import java.util.concurrent.TimeUnit;
 
-import com.google.common.collect.HashMultimap;
-import com.google.common.collect.Multimap;
 import com.google.common.util.concurrent.ListenableFuture;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
+import org.apache.cassandra.ServerTestUtils;
 import org.apache.cassandra.Util;
-import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.context.CounterContext;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.db.rows.BTreeRow;
 import org.apache.cassandra.db.rows.BufferCell;
 import org.apache.cassandra.db.rows.Cell;
 import org.apache.cassandra.db.rows.Row;
-import org.apache.cassandra.dht.Range;
-import org.apache.cassandra.dht.Token;
+import org.apache.cassandra.distributed.test.log.ClusterMetadataTestHelper;
+import org.apache.cassandra.exceptions.InvalidRoutingException;
 import org.apache.cassandra.exceptions.RequestFailureReason;
-import org.apache.cassandra.locator.Replica;
 import org.apache.cassandra.metrics.StorageMetrics;
 import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.MessagingService;
@@ -50,18 +47,15 @@ import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.StorageService;
+import org.apache.cassandra.tcm.ClusterMetadata;
+import org.apache.cassandra.tcm.membership.NodeState;
 import org.apache.cassandra.utils.FBUtilities;
 
+import static org.apache.cassandra.distributed.test.log.ClusterMetadataTestHelper.*;
+import static org.apache.cassandra.utils.ByteBufferUtil.bytes;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
-
-import static org.apache.cassandra.utils.ByteBufferUtil.bytes;
-import static org.apache.cassandra.utils.TokenRangeTestUtil.MessageDelivery;
-import static org.apache.cassandra.utils.TokenRangeTestUtil.broadcastAddress;
-import static org.apache.cassandra.utils.TokenRangeTestUtil.bytesToken;
-import static org.apache.cassandra.utils.TokenRangeTestUtil.node1;
-import static org.apache.cassandra.utils.TokenRangeTestUtil.randomInt;
-import static org.apache.cassandra.utils.TokenRangeTestUtil.registerOutgoingMessageSink;
+import static org.junit.Assert.fail;
 
 public class CounterMutationVerbHandlerOutOfRangeTest
 {
@@ -76,22 +70,20 @@ public class CounterMutationVerbHandlerOutOfRangeTest
     @BeforeClass
     public static void init() throws Exception
     {
-        SchemaLoader.loadSchema();
+        ServerTestUtils.prepareServerNoRegister();
         SchemaLoader.createKeyspace(KEYSPACE,
                                     KeyspaceParams.simple(1),
                                     SchemaLoader.counterCFMD(KEYSPACE, TABLE));
-        StorageService.instance.initServer(0);
+        ServerTestUtils.markCMS();
+        StorageService.instance.unsafeSetInitialized();
     }
 
     @Before
     public void setup() throws Exception
     {
-        DatabaseDescriptor.setLogOutOfTokenRangeRequests(true);
-        DatabaseDescriptor.setRejectOutOfTokenRangeRequests(true);
-
-        StorageService.instance.getTokenMetadata().clearUnsafe();
-        StorageService.instance.getTokenMetadata().updateNormalToken(bytesToken(0), node1);
-        StorageService.instance.getTokenMetadata().updateNormalToken(bytesToken(100), broadcastAddress);
+        ServerTestUtils.resetCMS();
+        ClusterMetadataTestHelper.addEndpoint(broadcastAddress, bytesToken(100));
+        ClusterMetadataTestHelper.addEndpoint(node1, bytesToken(0));
 
         MessagingService.instance().inboundSink.clear();
         MessagingService.instance().outboundSink.clear();
@@ -101,7 +93,6 @@ public class CounterMutationVerbHandlerOutOfRangeTest
         cfs.truncateBlocking();
         startingKeyspaceMetricCount = keyspaceMetricValue();
         startingTotalMetricCount = StorageMetrics.totalOpsForInvalidToken.getCount();
-
     }
 
     @Test
@@ -127,12 +118,13 @@ public class CounterMutationVerbHandlerOutOfRangeTest
     @Test
     public void acceptMutationForPendingEndpoint() throws Exception
     {
-        // remove localhost from TM and add it back as pending
-        StorageService.instance.getTokenMetadata().removeEndpoint(broadcastAddress);
-        Multimap<Range<Token>, Replica> pending = HashMultimap.create();
-        Range<Token> range = new Range<>(bytesToken(0), bytesToken(100));
-        pending.put(range, new Replica(broadcastAddress, range, true));
-        StorageService.instance.getTokenMetadata().setPendingRangesUnsafe(KEYSPACE, pending);
+        // reset ClusterMetadata then join the remote node and partially
+        // join the localhost one to emulate pending ranges
+        ServerTestUtils.resetCMS();
+        ClusterMetadataTestHelper.addEndpoint(node1, bytesToken(0));
+        ClusterMetadataTestHelper.register(broadcastAddress);
+        ClusterMetadataTestHelper.joinPartially(broadcastAddress, bytesToken(100));
+        assertEquals(NodeState.BOOTSTRAPPING, ClusterMetadata.current().directory.peerState(broadcastAddress));
 
         int messageId = randomInt();
         int value = randomInt();
@@ -153,26 +145,12 @@ public class CounterMutationVerbHandlerOutOfRangeTest
         int value = randomInt();
         int key = 200;
         CounterMutation mutation = mutation(key, value);
-        handler.doVerb(Message.builder(Verb.MUTATION_REQ, mutation).from(node1).withId(messageId).build());
-        verifyFailureResponse(messageSink, messageId);
-        assertEquals(startingTotalMetricCount + 1, StorageMetrics.totalOpsForInvalidToken.getCount());
-        assertEquals(startingKeyspaceMetricCount + 1, keyspaceMetricValue());
-    }
-
-    @Test
-    public void acceptMutationIfRejectionNotEnabled() throws Exception
-    {
-        DatabaseDescriptor.setRejectOutOfTokenRangeRequests(false);
-        int messageId = randomInt();
-        int value = randomInt();
-        int key = 500;
-        CounterMutation mutation = mutation(key, value);
-        // the node which is the actual natural endpoint for this mutation is not a real
-        // node, but if we write at CL.ANY we'll generate a hint for it and StorageProxy's
-        // counterWriterPerformer will blindly apply the mutation so we can verify it locally
-        handler.doVerb(Message.builder(Verb.MUTATION_REQ, mutation).from(node1).withId(messageId).build());
-
-        verifyWrite(key, value);
+        try
+        {
+            handler.doVerb(Message.builder(Verb.MUTATION_REQ, mutation).from(node1).withId(messageId).build());
+            fail("this should now throw exception");
+        }
+        catch (InvalidRoutingException ignore) {}
         assertEquals(startingTotalMetricCount + 1, StorageMetrics.totalOpsForInvalidToken.getCount());
         assertEquals(startingKeyspaceMetricCount + 1, keyspaceMetricValue());
     }
@@ -201,7 +179,7 @@ public class CounterMutationVerbHandlerOutOfRangeTest
         DecoratedKey dk = cfs.decorateKey(bytes(key));
         ColumnMetadata col = cfs.metadata().getColumn(bytes("val"));
         ByteBuffer val = CounterContext.instance().createLocal(columnValue);
-        Cell<?> counterCell = BufferCell.live(col, FBUtilities.timestampMicros(), val);
+        Cell counterCell = BufferCell.live(col, FBUtilities.timestampMicros(), val);
         Row row = BTreeRow.singleCellRow(cfs.metadata().comparator.make("clustering_1"), counterCell);
         PartitionUpdate update = PartitionUpdate.singleRowUpdate(cfm, dk, row);
         return new CounterMutation(new Mutation(update), ConsistencyLevel.ANY);

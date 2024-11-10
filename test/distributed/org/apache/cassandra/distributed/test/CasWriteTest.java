@@ -44,9 +44,6 @@ import org.junit.rules.ExpectedException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.distributed.Cluster;
-import org.apache.cassandra.distributed.api.ConsistencyLevel;
-import org.apache.cassandra.distributed.api.ICluster;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
@@ -56,6 +53,9 @@ import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.SinglePartitionReadCommand;
 import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.db.marshal.Int32Type;
+import org.apache.cassandra.distributed.Cluster;
+import org.apache.cassandra.distributed.api.ConsistencyLevel;
+import org.apache.cassandra.distributed.api.ICluster;
 import org.apache.cassandra.distributed.api.IInvokableInstance;
 import org.apache.cassandra.distributed.api.IMessageFilters;
 import org.apache.cassandra.distributed.shared.InstanceClassLoader;
@@ -129,6 +129,7 @@ public class CasWriteTest extends TestBaseImpl
     public void testCasWriteTimeoutAtPreparePhase_ReqLost()
     {
         expectCasWriteTimeout();
+        cluster.filters().verbs(Verb.PAXOS_PREPARE_REQ.id).from(1).to(2, 3).drop().on(); // drop the internode messages to acceptors
         cluster.filters().verbs(Verb.PAXOS2_PREPARE_REQ.id).from(1).to(2, 3).drop().on(); // drop the internode messages to acceptors
         cluster.coordinator(1).execute(mkUniqueCasInsertQuery(1), ConsistencyLevel.QUORUM);
     }
@@ -137,6 +138,7 @@ public class CasWriteTest extends TestBaseImpl
     public void testCasWriteTimeoutAtPreparePhase_RspLost()
     {
         expectCasWriteTimeout();
+        cluster.filters().verbs(Verb.PAXOS_PREPARE_RSP.id).from(2, 3).to(1).drop().on(); // drop the internode messages to acceptors
         cluster.filters().verbs(Verb.PAXOS2_PREPARE_RSP.id).from(2, 3).to(1).drop().on(); // drop the internode messages to acceptors
         cluster.coordinator(1).execute(mkUniqueCasInsertQuery(1), ConsistencyLevel.QUORUM);
     }
@@ -164,6 +166,7 @@ public class CasWriteTest extends TestBaseImpl
     {
         expectCasWriteTimeout();
         cluster.filters().verbs(Verb.PAXOS_COMMIT_REQ.id).from(1).to(2, 3).drop().on();
+        cluster.filters().verbs(Verb.PAXOS2_COMMIT_AND_PREPARE_REQ.id).from(1).to(2, 3).drop().on();
         cluster.coordinator(1).execute(mkUniqueCasInsertQuery(1), ConsistencyLevel.QUORUM);
     }
 
@@ -172,6 +175,7 @@ public class CasWriteTest extends TestBaseImpl
     {
         expectCasWriteTimeout();
         cluster.filters().verbs(Verb.PAXOS_COMMIT_RSP.id).from(2, 3).to(1).drop().on();
+        cluster.filters().verbs(Verb.PAXOS2_COMMIT_REMOTE_RSP.id).from(2, 3).to(1).drop().on();
         cluster.coordinator(1).execute(mkUniqueCasInsertQuery(1), ConsistencyLevel.QUORUM);
     }
 
@@ -186,6 +190,8 @@ public class CasWriteTest extends TestBaseImpl
                                c.filters().reset();
                                c.filters().verbs(Verb.PAXOS_PREPARE_REQ.id).from(1).to(3).drop();
                                c.filters().verbs(Verb.PAXOS_PROPOSE_REQ.id).from(1).to(2).drop();
+                               c.filters().verbs(Verb.PAXOS2_PREPARE_REQ.id).from(1).to(3).drop();
+                               c.filters().verbs(Verb.PAXOS2_PROPOSE_REQ.id).from(1).to(2).drop();
                            },
                            failure ->
                                failure.get() != null &&
@@ -282,7 +288,9 @@ public class CasWriteTest extends TestBaseImpl
                 cluster.coordinator(2).execute(mkCasInsertQuery((a) -> pk, 1, 2),
                                                ConsistencyLevel.QUORUM);
                 ready.countDown();
-            } else {
+            }
+            else
+            {
                 Uninterruptibles.awaitUninterruptibly(ready);
             }
             return false;

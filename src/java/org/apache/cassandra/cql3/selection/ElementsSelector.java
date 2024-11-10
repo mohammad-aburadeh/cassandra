@@ -21,10 +21,11 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 
 import com.google.common.base.Objects;
+import com.google.common.collect.Range;
 
 import org.apache.cassandra.cql3.ColumnSpecification;
 import org.apache.cassandra.cql3.QueryOptions;
-import org.apache.cassandra.cql3.Term;
+import org.apache.cassandra.cql3.terms.Term;
 import org.apache.cassandra.cql3.selection.SimpleSelector.SimpleSelectorFactory;
 import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.db.filter.ColumnFilter;
@@ -43,12 +44,19 @@ import org.apache.cassandra.utils.ByteBufferUtil;
  */
 abstract class ElementsSelector extends Selector
 {
+    /**
+     * An empty collection is composed of an int size of zero.
+     */
+    private static final ByteBuffer EMPTY_FROZEN_COLLECTION = ByteBufferUtil.bytes(0);
+
     protected final Selector selected;
+    protected final CollectionType<?> type;
 
     protected ElementsSelector(Kind kind,Selector selected)
     {
         super(kind);
         this.selected = selected;
+        this.type = getCollectionType(selected);
     }
 
     private static boolean isUnset(ByteBuffer bb)
@@ -161,7 +169,7 @@ abstract class ElementsSelector extends Selector
                 }
 
                 ColumnMetadata column = ((SimpleSelectorFactory) factory).getColumn();
-                builder.select(column, CellPath.create(((Term.Terminal)key).get(ProtocolVersion.V3)));
+                builder.select(column, CellPath.create(((Term.Terminal)key).get()));
             }
         };
     }
@@ -222,8 +230,8 @@ abstract class ElementsSelector extends Selector
                 }
 
                 ColumnMetadata column = ((SimpleSelectorFactory) factory).getColumn();
-                ByteBuffer fromBB = ((Term.Terminal)from).get(ProtocolVersion.V3);
-                ByteBuffer toBB = ((Term.Terminal)to).get(ProtocolVersion.V3);
+                ByteBuffer fromBB = ((Term.Terminal)from).get();
+                ByteBuffer toBB = ((Term.Terminal)to).get();
                 builder.slice(column, isUnset(fromBB) ? CellPath.BOTTOM : CellPath.create(fromBB), isUnset(toBB) ? CellPath.TOP  : CellPath.create(toBB));
             }
         };
@@ -237,9 +245,14 @@ abstract class ElementsSelector extends Selector
 
     protected abstract ByteBuffer extractSelection(ByteBuffer collection);
 
-    public void addInput(ProtocolVersion protocolVersion, InputRow input)
+    public void addInput(InputRow input)
     {
-        selected.addInput(protocolVersion, input);
+        selected.addInput(input);
+    }
+
+    protected Range<Integer> getIndexRange(ByteBuffer output, ByteBuffer fromKey, ByteBuffer toKey)
+    {
+        return type.getSerializer().getIndexesRangeFromSerialized(output, fromKey, toKey, keyType(type));
     }
 
     public void reset()
@@ -266,13 +279,11 @@ abstract class ElementsSelector extends Selector
             }
         };
 
-        private final CollectionType<?> type;
         private final ByteBuffer key;
 
         private ElementSelector(Selector selected, ByteBuffer key)
         {
             super(Kind.ELEMENT_SELECTOR, selected);
-            this.type = getCollectionType(selected);
             this.key = key;
         }
 
@@ -292,6 +303,31 @@ abstract class ElementsSelector extends Selector
         protected ByteBuffer extractSelection(ByteBuffer collection)
         {
             return type.getSerializer().getSerializedValue(collection, key, keyType(type));
+        }
+
+        protected int getElementIndex(ProtocolVersion protocolVersion, ByteBuffer key)
+        {
+            ByteBuffer output = selected.getOutput(protocolVersion);
+            return output == null ? -1 : type.getSerializer().getIndexFromSerialized(output, key, keyType(type));
+        }
+
+        @Override
+        protected ColumnTimestamps getWritetimes(ProtocolVersion protocolVersion)
+        {
+            return getElementTimestamps(protocolVersion, selected.getWritetimes(protocolVersion));
+        }
+
+        @Override
+        protected ColumnTimestamps getTTLs(ProtocolVersion protocolVersion)
+        {
+            return getElementTimestamps(protocolVersion, selected.getTTLs(protocolVersion));
+        }
+
+        private ColumnTimestamps getElementTimestamps(ProtocolVersion protocolVersion,
+                                                      ColumnTimestamps timestamps)
+        {
+            int index = getElementIndex(protocolVersion, key);
+            return index == -1 ? ColumnTimestamps.NO_TIMESTAMP : timestamps.get(index);
         }
 
         public AbstractType<?> getType()
@@ -358,8 +394,6 @@ abstract class ElementsSelector extends Selector
             }
         };
 
-        private final CollectionType<?> type;
-
         // Note that neither from nor to can be null, but they can both be ByteBufferUtil.UNSET_BYTE_BUFFER to represent no particular bound
         private final ByteBuffer from;
         private final ByteBuffer to;
@@ -368,7 +402,6 @@ abstract class ElementsSelector extends Selector
         {
             super(Kind.SLICE_SELECTOR, selected);
             assert from != null && to != null : "We can have unset buffers, but not nulls";
-            this.type = getCollectionType(selected);
             this.from = from;
             this.to = to;
         }
@@ -389,6 +422,36 @@ abstract class ElementsSelector extends Selector
         protected ByteBuffer extractSelection(ByteBuffer collection)
         {
             return type.getSerializer().getSliceFromSerialized(collection, from, to, type.nameComparator(), type.isFrozenCollection());
+        }
+
+        @Override
+        protected ColumnTimestamps getWritetimes(ProtocolVersion protocolVersion)
+        {
+            return getTimestampsSlice(protocolVersion, selected.getWritetimes(protocolVersion));
+        }
+
+        @Override
+        protected ColumnTimestamps getTTLs(ProtocolVersion protocolVersion)
+        {
+            return getTimestampsSlice(protocolVersion, selected.getTTLs(protocolVersion));
+        }
+
+        protected ColumnTimestamps getTimestampsSlice(ProtocolVersion protocolVersion, ColumnTimestamps timestamps)
+        {
+            ByteBuffer output = selected.getOutput(protocolVersion);
+            return (output == null || isCollectionEmpty(output))
+                   ? ColumnTimestamps.NO_TIMESTAMP
+                   : timestamps.slice(getIndexRange(output, from, to) );
+        }
+
+        /**
+         * Checks if the collection is empty. Only frozen collection can be empty.
+         * @param output the serialized collection
+         * @return {@code true} if the collection is empty {@code false} otherwise.
+         */
+        private boolean isCollectionEmpty(ByteBuffer output)
+        {
+            return EMPTY_FROZEN_COLLECTION.equals(output);
         }
 
         public AbstractType<?> getType()

@@ -19,6 +19,8 @@
 package org.apache.cassandra.distributed.test;
 
 import java.io.IOException;
+import java.nio.file.FileStore;
+import java.util.Map;
 
 import org.junit.Test;
 
@@ -77,14 +79,14 @@ public class LeveledCompactionTaskTest extends TestBaseImpl
         public static void install(ClassLoader cl, int id)
         {
             new ByteBuddy().rebase(Directories.class)
-                           .method(named("hasAvailableDiskSpace").and(takesArguments(2)))
+                           .method(named("hasDiskSpaceForCompactionsAndStreams").and(takesArguments(2)))
                            .intercept(MethodDelegation.to(BB.class))
                            .make()
                            .load(cl, ClassLoadingStrategy.Default.INJECTION);
         }
 
         @SuppressWarnings("unused")
-        public static boolean hasAvailableDiskSpace(long estimatedSSTables, long expectedTotalWriteSize)
+        public static boolean hasDiskSpaceForCompactionsAndStreams(Map<FileStore, Long> totalToWrite)
         {
             return hasDiskSpaceResult;
         }

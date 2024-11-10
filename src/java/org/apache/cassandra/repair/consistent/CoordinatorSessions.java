@@ -27,13 +27,18 @@ import com.google.common.base.Preconditions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.net.Message;
+import org.apache.cassandra.repair.SharedContext;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.repair.messages.FailSession;
 import org.apache.cassandra.repair.messages.FinalizePromise;
 import org.apache.cassandra.repair.messages.PrepareConsistentResponse;
+import org.apache.cassandra.repair.messages.RepairMessage;
 import org.apache.cassandra.service.ActiveRepairService;
 import org.apache.cassandra.repair.NoSuchRepairSessionException;
 import org.apache.cassandra.utils.TimeUUID;
+
+import static org.apache.cassandra.repair.messages.RepairMessage.sendFailureResponse;
 
 /**
  * Container for all consistent repair sessions a node is coordinating
@@ -41,7 +46,14 @@ import org.apache.cassandra.utils.TimeUUID;
 public class CoordinatorSessions
 {
     private static final Logger logger = LoggerFactory.getLogger(CoordinatorSessions.class);
+    private final SharedContext ctx;
+    
     private final Map<TimeUUID, CoordinatorSession> sessions = new HashMap<>();
+
+    public CoordinatorSessions(SharedContext ctx)
+    {
+        this.ctx = ctx;
+    }
 
     protected CoordinatorSession buildSession(CoordinatorSession.Builder builder)
     {
@@ -50,14 +62,14 @@ public class CoordinatorSessions
 
     public synchronized CoordinatorSession registerSession(TimeUUID sessionId, Set<InetAddressAndPort> participants, boolean isForced) throws NoSuchRepairSessionException
     {
-        ActiveRepairService.ParentRepairSession prs = ActiveRepairService.instance.getParentRepairSession(sessionId);
+        ActiveRepairService.ParentRepairSession prs = ctx.repair().getParentRepairSession(sessionId);
 
         Preconditions.checkArgument(!sessions.containsKey(sessionId),
                                     "A coordinator already exists for session %s", sessionId);
         Preconditions.checkArgument(!isForced || prs.repairedAt == ActiveRepairService.UNREPAIRED_SSTABLE,
                                     "cannot promote data for forced incremental repairs");
 
-        CoordinatorSession.Builder builder = CoordinatorSession.builder();
+        CoordinatorSession.Builder builder = CoordinatorSession.builder(ctx);
         builder.withState(ConsistentSession.State.PREPARING);
         builder.withSessionID(sessionId);
         builder.withCoordinator(prs.coordinator);
@@ -67,6 +79,7 @@ public class CoordinatorSessions
         builder.withRanges(prs.getRanges());
         builder.withParticipants(participants);
         builder.withListener(this::onSessionStateUpdate);
+        builder.withContext(ctx);
         CoordinatorSession session = buildSession(builder);
         sessions.put(session.sessionID, session);
         return session;
@@ -86,21 +99,31 @@ public class CoordinatorSessions
         }
     }
 
-    public void handlePrepareResponse(PrepareConsistentResponse msg)
+    public void handlePrepareResponse(Message<? extends RepairMessage> msg)
     {
-        CoordinatorSession session = getSession(msg.parentSession);
+        PrepareConsistentResponse payload = (PrepareConsistentResponse) msg.payload;
+        CoordinatorSession session = getSession(payload.parentSession);
         if (session != null)
         {
-            session.handlePrepareResponse(msg.participant, msg.success);
+            session.handlePrepareResponse((Message<PrepareConsistentResponse>) msg);
+        }
+        else
+        {
+            sendFailureResponse(ctx, msg);
         }
     }
 
-    public void handleFinalizePromiseMessage(FinalizePromise msg)
+    public void handleFinalizePromiseMessage(Message<? extends RepairMessage> message)
     {
+        FinalizePromise msg = (FinalizePromise) message.payload;
         CoordinatorSession session = getSession(msg.sessionID);
         if (session != null)
         {
-            session.handleFinalizePromise(msg.participant, msg.promised);
+            session.handleFinalizePromise((Message<FinalizePromise>) message);
+        }
+        else
+        {
+            sendFailureResponse(ctx, message);
         }
     }
 
