@@ -96,6 +96,7 @@
  * Add the ability to disable bulk loading of SSTables (CASSANDRA-18781)
  * Clean up obsolete functions and simplify cql_version handling in cqlsh (CASSANDRA-18787)
 Merged from 5.0:
+ * Batch clusterings into single SAI partition post-filtering reads (CASSANDRA-19497)
  * Ban the usage of "var" instead of full types in the production code (CASSANDRA-20038)
  * Suppress CVE-2024-45772, upgrade to lucene-core-9.12.0.jar (CASSANDRA-20024)
  * Use SinglePartitionReadCommand for index queries that use strict filtering (CASSANDRA-19968)
@@ -116,6 +117,8 @@ Merged from 5.0:
 Merged from 4.1:
  * Fix race condition in DecayingEstimatedHistogramReservoir during rescale (CASSANDRA-19365)
 Merged from 4.0:
+ * Support UDTs and vectors as clustering keys in descending order (CASSANDRA-20050)
+ * Fix CQL in snapshot's schema which did not contained UDTs used as reverse clustering columns (CASSANDRA-20036)
  * Add configurable batchlog endpoint strategies: random_remote, prefer_local, dynamic_remote, and dynamic (CASSANDRA-18120)
  * Fix bash-completion for debian distro (CASSANDRA-19999)
  * Ensure thread-safety for CommitLogArchiver in CommitLog (CASSANDRA-19960)
