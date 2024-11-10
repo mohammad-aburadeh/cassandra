@@ -25,7 +25,7 @@ import com.sun.jna.Pointer;
  * @see NativeLibrary
  */
 @Shared
-interface NativeLibraryWrapper
+public interface NativeLibraryWrapper
 {
     /**
      * Checks if the library has been successfully linked.

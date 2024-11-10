@@ -25,7 +25,6 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
-import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 import io.netty.buffer.ByteBuf;
@@ -55,7 +54,6 @@ import org.apache.cassandra.net.AsyncStreamingInputPlus;
 import org.apache.cassandra.net.AsyncStreamingOutputPlus;
 import org.apache.cassandra.schema.CachingParams;
 import org.apache.cassandra.schema.KeyspaceParams;
-import org.apache.cassandra.streaming.DefaultConnectionFactory;
 import org.apache.cassandra.streaming.PreviewKind;
 import org.apache.cassandra.streaming.SessionInfo;
 import org.apache.cassandra.streaming.StreamCoordinator;
@@ -64,6 +62,7 @@ import org.apache.cassandra.streaming.StreamOperation;
 import org.apache.cassandra.streaming.StreamResultFuture;
 import org.apache.cassandra.streaming.StreamSession;
 import org.apache.cassandra.streaming.StreamSummary;
+import org.apache.cassandra.streaming.async.NettyStreamingConnectionFactory;
 import org.apache.cassandra.streaming.messages.StreamMessageHeader;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
@@ -79,9 +78,11 @@ import org.openjdk.jmh.annotations.TearDown;
 import org.openjdk.jmh.annotations.Threads;
 import org.openjdk.jmh.annotations.Warmup;
 
+import static org.apache.cassandra.utils.TimeUUID.Generator.nextTimeUUID;
+
 /**
- * Please ensure that this benchmark is run with stream_throughput_outbound_megabits_per_sec set to a
- * really high value otherwise, throttling will kick in and the results will not be meaningful.
+ * Please ensure that this benchmark is run with entire_sstable_stream_throughput_outbound
+ * set to a really high value otherwise, throttling will kick in and the results will not be meaningful.
  */
 @Warmup(iterations = 1, time = 1, timeUnit = TimeUnit.SECONDS)
 @Measurement(iterations = 10, time = 1, timeUnit = TimeUnit.SECONDS)
@@ -120,7 +121,7 @@ public class ZeroCopyStreamingBench
 
             sstable = store.getLiveSSTables().iterator().next();
             session = setupStreamingSessionForTest();
-            context = ComponentContext.create(sstable.descriptor);
+            context = ComponentContext.create(sstable);
             blockStreamWriter = new CassandraEntireSSTableStreamWriter(sstable, session, context);
 
             CapturingNettyChannel blockStreamCaptureChannel = new CapturingNettyChannel(STREAM_SIZE);
@@ -133,7 +134,6 @@ public class ZeroCopyStreamingBench
 
             CassandraStreamHeader entireSSTableStreamHeader =
                 CassandraStreamHeader.builder()
-                                     .withSSTableFormat(sstable.descriptor.formatType)
                                      .withSSTableVersion(sstable.descriptor.version)
                                      .withSSTableLevel(0)
                                      .withEstimatedKeys(sstable.estimatedKeys())
@@ -141,7 +141,7 @@ public class ZeroCopyStreamingBench
                                      .withSerializationHeader(sstable.header.toComponent())
                                      .withComponentManifest(context.manifest())
                                      .isEntireSSTable(true)
-                                     .withFirstKey(sstable.first)
+                                     .withFirstKey(sstable.getFirst())
                                      .withTableId(sstable.metadata().id)
                                      .build();
 
@@ -150,10 +150,9 @@ public class ZeroCopyStreamingBench
                                                                                                0, 0, 0,
                                                                                                null), entireSSTableStreamHeader, session);
 
-            List<Range<Token>> requestedRanges = Arrays.asList(new Range<>(sstable.first.minValue().getToken(), sstable.last.getToken()));
+            List<Range<Token>> requestedRanges = Arrays.asList(new Range<>(sstable.getFirst().minValue().getToken(), sstable.getLast().getToken()));
             CassandraStreamHeader partialSSTableStreamHeader =
             CassandraStreamHeader.builder()
-                                 .withSSTableFormat(sstable.descriptor.formatType)
                                  .withSSTableVersion(sstable.descriptor.version)
                                  .withSSTableLevel(0)
                                  .withEstimatedKeys(sstable.estimatedKeys())
@@ -202,7 +201,7 @@ public class ZeroCopyStreamingBench
                 .build()
                 .applyUnsafe();
             }
-            store.forceBlockingFlush();
+            store.forceBlockingFlush(ColumnFamilyStore.FlushReason.USER_FORCED);
             CompactionManager.instance.performMaximal(store, false);
         }
 
@@ -216,13 +215,13 @@ public class ZeroCopyStreamingBench
 
         private StreamSession setupStreamingSessionForTest()
         {
-            StreamCoordinator streamCoordinator = new StreamCoordinator(StreamOperation.BOOTSTRAP, 1, new DefaultConnectionFactory(), false, false, null, PreviewKind.NONE);
-            StreamResultFuture future = StreamResultFuture.createInitiator(UUID.randomUUID(), StreamOperation.BOOTSTRAP, Collections.<StreamEventHandler>emptyList(), streamCoordinator);
+            StreamCoordinator streamCoordinator = new StreamCoordinator(StreamOperation.BOOTSTRAP, 1, new NettyStreamingConnectionFactory(), false, false, null, PreviewKind.NONE);
+            StreamResultFuture future = StreamResultFuture.createInitiator(nextTimeUUID(), StreamOperation.BOOTSTRAP, Collections.<StreamEventHandler>emptyList(), streamCoordinator);
 
             InetAddressAndPort peer = FBUtilities.getBroadcastAddressAndPort();
-            streamCoordinator.addSessionInfo(new SessionInfo(peer, 0, peer, Collections.emptyList(), Collections.emptyList(), StreamSession.State.INITIALIZED));
+            streamCoordinator.addSessionInfo(new SessionInfo(peer, 0, peer, Collections.emptyList(), Collections.emptyList(), StreamSession.State.INITIALIZED, null));
 
-            StreamSession session = streamCoordinator.getOrCreateNextSession(peer);
+            StreamSession session = streamCoordinator.getOrCreateOutboundSession(peer);
             session.init(future);
             return session;
         }
@@ -241,7 +240,7 @@ public class ZeroCopyStreamingBench
 
     @Benchmark
     @BenchmarkMode(Mode.Throughput)
-    public void blockStreamReader(BenchmarkState state) throws Exception
+    public void blockStreamReader(BenchmarkState state) throws Throwable
     {
         EmbeddedChannel channel = createMockNettyChannel();
         AsyncStreamingInputPlus in = new AsyncStreamingInputPlus(channel);
@@ -265,7 +264,7 @@ public class ZeroCopyStreamingBench
 
     @Benchmark
     @BenchmarkMode(Mode.Throughput)
-    public void partialStreamReader(BenchmarkState state) throws Exception
+    public void partialStreamReader(BenchmarkState state) throws Throwable
     {
         EmbeddedChannel channel = createMockNettyChannel();
         AsyncStreamingInputPlus in = new AsyncStreamingInputPlus(channel);

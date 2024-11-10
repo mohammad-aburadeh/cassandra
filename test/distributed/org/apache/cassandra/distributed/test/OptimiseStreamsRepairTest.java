@@ -111,11 +111,10 @@ public class OptimiseStreamsRepairTest extends TestBaseImpl
                            .load(cl, ClassLoadingStrategy.Default.INJECTION);
         }
 
-        @SuppressWarnings("unused")
         public static List<SyncTask> createOptimisedSyncingSyncTasks(List<TreeResponse> trees,
                                                                      @SuperCall Callable<List<SyncTask>> zuperCall)
         {
-            List<SyncTask> tasks;
+            List<SyncTask> tasks = null;
             try
             {
                 tasks = zuperCall.call();

@@ -123,7 +123,6 @@ public abstract class Rows
      * @param merged the result of merging {@code inputs}.
      * @param inputs the inputs whose merge yielded {@code merged}.
      */
-    @SuppressWarnings("resource")
     public static void diff(RowDiffListener diffListener, Row merged, Row...inputs)
     {
         Clustering<?> clustering = merged.clustering();
@@ -237,8 +236,8 @@ public abstract class Rows
     }
 
     /**
-     * Merges two rows into the given builder, mainly for merging memtable rows. In addition to reconciling the cells
-     * in each row, the liveness info, and deletion times for the row and complex columns are also merged.
+     * Merges two rows. In addition to reconciling the cells in each row, the liveness info, and deletion times for
+     * the row and complex columns are also merged.
      * <p>
      * Note that this method assumes that the provided rows can meaningfully be reconciled together. That is,
      * that the rows share the same clustering value, and belong to the same partition.

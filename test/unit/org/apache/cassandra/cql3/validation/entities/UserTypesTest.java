@@ -24,16 +24,19 @@ import org.junit.Test;
 
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.dht.ByteOrderedPartitioner;
+import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.service.StorageService;
+
+import static org.apache.cassandra.ServerTestUtils.daemonInitialization;
 
 public class UserTypesTest extends CQLTester
 {
     @BeforeClass
     public static void setUpClass()     // overrides CQLTester.setUpClass()
     {
+        daemonInitialization();
         // Selecting partitioner for a table is not exposed on CREATE TABLE.
         StorageService.instance.setPartitionerUnsafe(ByteOrderedPartitioner.instance);
-
         prepareServer();
     }
 
@@ -98,6 +101,22 @@ public class UserTypesTest extends CQLTester
         beforeAndAfterFlush(() ->
             assertRows(execute("SELECT v.x FROM %s WHERE k = ? AND v = {x:?}", 1, -104.99251),
                 row(-104.99251)
+            )
+        );
+    }
+
+    @Test
+    public void testDescendingOrderingOfUserTypesIsSupported() throws Throwable
+    {
+        String myType = createType("CREATE TYPE %s (x double)");
+        createTable("CREATE TABLE %s (k int, v frozen<" + myType + ">, b boolean static, PRIMARY KEY (k, v)) WITH CLUSTERING ORDER BY (v DESC)");
+
+        execute("INSERT INTO %s(k, v) VALUES (?, {x:?})", 1, -104.99251);
+        execute("UPDATE %s SET b = ? WHERE k = ?", true, 1);
+
+        beforeAndAfterFlush(() ->
+            assertRows(execute("SELECT v.x FROM %s WHERE k = ? AND v = {x:?}", 1, -104.99251),
+                       row(-104.99251)
             )
         );
     }
@@ -179,6 +198,11 @@ public class UserTypesTest extends CQLTester
         String myType2 = KEYSPACE + '.' + typename2;
         assertInvalidMessage("Non-frozen UDTs with nested non-frozen collections are not supported",
                 "CREATE TABLE " + KEYSPACE + ".wrong (k int PRIMARY KEY, v " + myType2 + ")");
+
+        String userType = createType("CREATE TYPE %s (userids SET<UUID>)");
+        createTable("CREATE TABLE %s (id int PRIMARY KEY)");
+        assertInvalidMessage("Non-frozen UDTs with nested non-frozen collections are not supported for column my_type",
+                             "alter TABLE %s add my_type " + userType);
     }
 
     @Test
@@ -199,6 +223,56 @@ public class UserTypesTest extends CQLTester
             assertRows(execute("SELECT b.a, b.b FROM %s"),
                        row(1, null),
                        row(2, 2))
+        );
+    }
+
+    @Test
+    public void testNullsInIntUDT() throws Throwable
+    {
+        String myType = KEYSPACE + '.' + createType("CREATE TYPE %s (a int)");
+        createTable("CREATE TABLE %s (a int PRIMARY KEY, b frozen<" + myType + ">)");
+        execute("INSERT INTO %s (a, b) VALUES (1, ?)", userType("a", 1));
+
+        assertRows(execute("SELECT b.a FROM %s"), row(1));
+
+        flush();
+
+        schemaChange("ALTER TYPE " + myType + " ADD b int");
+        execute("INSERT INTO %s (a, b) VALUES (2, {a: 2, b: 2})");
+        execute("INSERT INTO %s (a, b) VALUES (3, {b: 3})");
+        execute("INSERT INTO %s (a, b) VALUES (4, {a: null, b: 4})");
+
+        beforeAndAfterFlush(() ->
+                            assertRows(execute("SELECT b.a, b.b FROM %s"),
+                                       row(1, null),
+                                       row(2, 2),
+                                       row(null, 3),
+                                       row(null, 4))
+        );
+    }
+
+    @Test
+    public void testNullsInTextUDT() throws Throwable
+    {
+        String myType = KEYSPACE + '.' + createType("CREATE TYPE %s (a text)");
+        createTable("CREATE TABLE %s (a int PRIMARY KEY, b frozen<" + myType + ">)");
+        execute("INSERT INTO %s (a, b) VALUES (1, {a: ''})");
+
+        assertRows(execute("SELECT b.a FROM %s"), row(""));
+
+        flush();
+
+        schemaChange("ALTER TYPE " + myType + " ADD b text");
+        execute("INSERT INTO %s (a, b) VALUES (2, {a: '', b: ''})");
+        execute("INSERT INTO %s (a, b) VALUES (3, {b: ''})");
+        execute("INSERT INTO %s (a, b) VALUES (4, {a: null, b: ''})");
+
+        beforeAndAfterFlush(() ->
+                            assertRows(execute("SELECT b.a, b.b FROM %s"),
+                                       row("", null),
+                                       row("", ""),
+                                       row(null, ""),
+                                       row(null, ""))
         );
     }
 
@@ -899,5 +973,36 @@ public class UserTypesTest extends CQLTester
     private String typeWithKs(String type1)
     {
         return keyspace() + '.' + type1;
+    }
+
+    @Test
+    public void testAlteringTypeWithIfNotExits() throws Throwable
+    {
+        String columnType = typeWithKs(createType("CREATE TYPE %s (a int)"));
+
+        createTable("CREATE TABLE %s (k int PRIMARY KEY, y frozen<" + columnType + ">)");
+        execute("ALTER TYPE " + columnType + " ADD IF NOT EXISTS a int");
+
+        execute("INSERT INTO %s (k, y) VALUES(?, ?)", 1, userType("a", 1));
+        assertRows(execute("SELECT * FROM %s"), row(1, userType("a", 1)));
+
+        assertInvalidThrowMessage(String.format("Cannot add field %s to type %s: a field with name %s already exists", "a", columnType, "a"),
+                                  InvalidRequestException.class,
+                                  "ALTER TYPE " + columnType + " ADD a int");
+    }
+
+    @Test
+    public void testAlteringTypeRenameWithIfExists() throws Throwable
+    {
+        String columnType = typeWithKs(createType("CREATE TYPE %s (a int)"));
+        createTable("CREATE TABLE %s (k int PRIMARY KEY, y frozen<" + columnType + ">)");
+        execute("ALTER TYPE " + columnType + " RENAME IF EXISTS a TO z AND b TO Y;");
+
+        execute("INSERT INTO %s (k, y) VALUES(?, ?)", 1, userType("z", 1));
+        assertRows(execute("SELECT * FROM %s"), row(1, userType("z", 1)));
+
+        assertInvalidThrowMessage(String.format("Unkown field %s in user type %s", "a", columnType),
+                                  InvalidRequestException.class,
+                                  "ALTER TYPE " + columnType + " RENAME a TO z;");
     }
 }

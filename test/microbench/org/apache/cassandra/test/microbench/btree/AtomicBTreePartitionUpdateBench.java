@@ -24,7 +24,6 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Random;
 import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -51,8 +50,8 @@ import org.apache.cassandra.db.marshal.BytesType;
 import org.apache.cassandra.db.marshal.CompositeType;
 import org.apache.cassandra.db.marshal.Int32Type;
 import org.apache.cassandra.db.marshal.MapType;
-import org.apache.cassandra.db.partitions.AbstractBTreePartition;
 import org.apache.cassandra.db.partitions.AtomicBTreePartition;
+import org.apache.cassandra.db.partitions.BTreePartitionData;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.db.rows.BTreeRow;
 import org.apache.cassandra.db.rows.BufferCell;
@@ -71,6 +70,7 @@ import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.schema.TableMetadataRef;
 import org.apache.cassandra.utils.btree.BTree;
 import org.apache.cassandra.utils.btree.UpdateFunction;
+import org.apache.cassandra.utils.concurrent.ImmediateFuture;
 import org.apache.cassandra.utils.concurrent.OpOrder;
 import org.apache.cassandra.utils.BulkIterator;
 import org.apache.cassandra.utils.memory.ByteBufferCloner;
@@ -105,7 +105,7 @@ public class AtomicBTreePartitionUpdateBench
 {
     private static final OpOrder NO_ORDER = new OpOrder();
     private static final MutableDeletionInfo NO_DELETION_INFO = new MutableDeletionInfo(DeletionTime.LIVE);
-    private static final HeapPool POOL = new HeapPool(Long.MAX_VALUE, 1.0f, () -> CompletableFuture.completedFuture(Boolean.TRUE));
+    private static final HeapPool POOL = new HeapPool(Long.MAX_VALUE, 1.0f, () -> ImmediateFuture.success(Boolean.TRUE));
     private static final ByteBuffer zero = Int32Type.instance.decompose(0);
     private static final DecoratedKey decoratedKey = new BufferDecoratedKey(new ByteOrderedPartitioner().getToken(zero), zero);
 
@@ -240,7 +240,7 @@ public class AtomicBTreePartitionUpdateBench
             try (BulkIterator<Row> iter = BulkIterator.of(insertBuffer))
             {
                 Object[] tree = BTree.build(iter, rowCount, UpdateFunction.noOp());
-                return PartitionUpdate.unsafeConstruct(metadata, decoratedKey, AbstractBTreePartition.unsafeConstructHolder(partitionColumns, tree, DeletionInfo.LIVE, Rows.EMPTY_STATIC_ROW, EncodingStats.NO_STATS), NO_DELETION_INFO, false);
+                return PartitionUpdate.unsafeConstruct(metadata, decoratedKey, BTreePartitionData.unsafeConstruct(partitionColumns, tree, DeletionInfo.LIVE, Rows.EMPTY_STATIC_ROW, EncodingStats.NO_STATS), NO_DELETION_INFO, false);
             }
         }
 
@@ -342,12 +342,7 @@ public class AtomicBTreePartitionUpdateBench
                         public ByteBuffer allocate(int size)
                         {
                             if (invalidateOn > 0 && --invalidateOn == 0)
-                            {
-                                AbstractBTreePartition.Holder holder = update.unsafeGetHolder();
-                                if (!BTree.isEmpty(holder.tree))
-                                    update.unsafeSetHolder(AbstractBTreePartition.unsafeConstructHolder(
-                                        holder.columns, Arrays.copyOf(holder.tree, holder.tree.length), holder.deletionInfo, holder.staticRow, holder.stats));
-                            }
+                                BTreePartitionData.unsafeInvalidate(update);
                             return ByteBuffer.allocate(size);
                         }
                     };
@@ -397,7 +392,7 @@ public class AtomicBTreePartitionUpdateBench
                         ThreadLocalRandom.current().nextLong();
                 }
                 invokeBefore.accept(this);
-                update.addAllWithSizeDelta(insert[index], cloner, NO_ORDER.getCurrent(), UpdateTransaction.NO_OP);
+                update.addAll(insert[index], cloner, NO_ORDER.getCurrent(), UpdateTransaction.NO_OP);
                 return true;
             }
             finally
@@ -405,7 +400,7 @@ public class AtomicBTreePartitionUpdateBench
                 if (state.addAndGet(0x100000L) == ((((long)ifGeneration) << 40) | (((long)insert.length) << 20) | insert.length))
                 {
                     activeThreads.set(0);
-                    update.unsafeSetHolder(AbstractBTreePartition.unsafeGetEmptyHolder());
+                    update.unsafeSetHolder(BTreePartitionData.unsafeGetEmpty());
                     // reset the state and rollover the generation
                     state.set((ifGeneration + 1L) << 40);
                 }
@@ -566,7 +561,13 @@ public class AtomicBTreePartitionUpdateBench
     private static ColumnMetadata[] columns(AbstractType<?> type, ColumnMetadata.Kind kind, int count, String prefix)
     {
         return IntStream.range(0, count)
-                        .mapToObj(i -> new ColumnMetadata("", "", new ColumnIdentifier(prefix + i, true), type, kind != ColumnMetadata.Kind.REGULAR ? i : ColumnMetadata.NO_POSITION, kind))
+                        .mapToObj(i -> new ColumnMetadata("",
+                                                          "",
+                                                          new ColumnIdentifier(prefix + i, true),
+                                                          type,
+                                                          kind != ColumnMetadata.Kind.REGULAR ? i : ColumnMetadata.NO_POSITION,
+                                                          kind,
+                                                          null))
                         .toArray(ColumnMetadata[]::new);
     }
 

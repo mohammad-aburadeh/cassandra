@@ -32,6 +32,7 @@ import org.apache.cassandra.cql3.UntypedResultSet;
 import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.utils.FBUtilities;
 
+import static org.apache.cassandra.utils.Clock.Global.nanoTime;
 import static org.junit.Assert.assertEquals;
 
 public class CollectionsTest extends CQLTester
@@ -576,18 +577,6 @@ public class CollectionsTest extends CQLTester
         execute("ALTER TABLE %s ADD alist list<text>");
     }
 
-    /**
-     * Migrated from cql_tests.py:TestCQL.collection_function_test()
-     */
-    @Test
-    public void testFunctionsOnCollections() throws Throwable
-    {
-        createTable("CREATE TABLE %s (k int PRIMARY KEY, l set<int>)");
-
-        assertInvalid("SELECT ttl(l) FROM %s WHERE k = 0");
-        assertInvalid("SELECT writetime(l) FROM %s WHERE k = 0");
-    }
-
     @Test
     public void testInRestrictionWithCollection() throws Throwable
     {
@@ -696,7 +685,7 @@ public class CollectionsTest extends CQLTester
     public void testMapWithLargePartition() throws Throwable
     {
         Random r = new Random();
-        long seed = System.nanoTime();
+        long seed = nanoTime();
         System.out.println("Seed " + seed);
         r.setSeed(seed);
 
@@ -975,7 +964,7 @@ public class CollectionsTest extends CQLTester
         createTable("CREATE TABLE %s(pk int PRIMARY KEY, s set<text>)");
         assertInvalidMessage("Not enough bytes to read a set",
                              "INSERT INTO %s (pk, s) VALUES (?, ?)", 1, "test");
-        assertInvalidMessage("Null value read when not allowed",
+        assertInvalidMessage("Not enough bytes to read a set",
                              "INSERT INTO %s (pk, s) VALUES (?, ?)", 1, Long.MAX_VALUE);
         assertInvalidMessage("Not enough bytes to read a set",
                              "INSERT INTO %s (pk, s) VALUES (?, ?)", 1, "");
@@ -987,9 +976,9 @@ public class CollectionsTest extends CQLTester
     public void testInvalidInputForMap() throws Throwable
     {
         createTable("CREATE TABLE %s(pk int PRIMARY KEY, m map<text, text>)");
-        assertInvalidMessage("Not enough bytes to read a map",
+        assertInvalidMessage("The data cannot be deserialized as a map",
                              "INSERT INTO %s (pk, m) VALUES (?, ?)", 1, "test");
-        assertInvalidMessage("Null value read when not allowed",
+        assertInvalidMessage("The data cannot be deserialized as a map",
                              "INSERT INTO %s (pk, m) VALUES (?, ?)", 1, Long.MAX_VALUE);
         assertInvalidMessage("Not enough bytes to read a map",
                              "INSERT INTO %s (pk, m) VALUES (?, ?)", 1, "");

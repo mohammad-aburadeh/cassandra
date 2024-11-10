@@ -26,6 +26,7 @@ import java.util.UUID;
 import com.google.common.collect.ImmutableSet;
 import org.junit.Test;
 
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.distributed.Cluster;
 import org.apache.cassandra.distributed.Constants;
 import org.apache.cassandra.distributed.api.Feature;
@@ -57,17 +58,18 @@ public class IPMembershipTest extends TestBaseImpl
             IInvokableInstance nodeToReplace = cluster.get(3);
 
             ToolRunner.invokeCassandraStress("write", "n=10000", "-schema", "replication(factor=3)", "-port", "native=9042").assertOnExitCode();
-
+            DatabaseDescriptor.toolInitialization(); // needed for deleteRecursive below
             for (boolean auto_bootstrap : Arrays.asList(true, false))
             {
                 stopUnchecked(nodeToReplace);
                 getDirectories(nodeToReplace).forEach(FileUtils::deleteRecursive);
 
                 nodeToReplace.config().set("auto_bootstrap", auto_bootstrap);
+
                 // we need to override the host id because otherwise the node will not be considered as a new node
                 ((InstanceConfig) nodeToReplace.config()).setHostId(UUID.randomUUID());
 
-                Assertions.assertThatThrownBy(() -> nodeToReplace.startup())
+                Assertions.assertThatThrownBy(nodeToReplace::startup)
                           .hasMessage("A node with address /127.0.0.3:7012 already exists, cancelling join. Use cassandra.replace_address if you want to replace this node.");
             }
         }
@@ -77,7 +79,7 @@ public class IPMembershipTest extends TestBaseImpl
      * Tests the behavior if a node restarts with a different IP.
      */
     @Test
-    public void startupNewIP() throws IOException, InterruptedException
+    public void startupNewIP() throws IOException
     {
         try (Cluster cluster = Cluster.build(3)
                                       .withConfig(c -> c.with(Feature.GOSSIP, Feature.NATIVE_PROTOCOL)

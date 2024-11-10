@@ -18,11 +18,15 @@
 
 package org.apache.cassandra.db.compaction;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.UUID;
 
 import com.google.common.collect.Iterables;
+
+import org.apache.cassandra.Util;
+import org.apache.cassandra.repair.consistent.LocalSession;
+
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -31,9 +35,11 @@ import org.apache.cassandra.notifications.SSTableAddedNotification;
 import org.apache.cassandra.notifications.SSTableDeletingNotification;
 import org.apache.cassandra.notifications.SSTableListChangedNotification;
 import org.apache.cassandra.notifications.SSTableRepairStatusChanged;
+import org.apache.cassandra.repair.NoSuchRepairSessionException;
 import org.apache.cassandra.repair.consistent.LocalSessionAccessor;
 import org.apache.cassandra.service.ActiveRepairService;
 import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.TimeUUID;
 
 /**
  * Tests CompactionStrategyManager's handling of pending repair sstables
@@ -61,12 +67,12 @@ public class CompactionStrategyManagerPendingRepairTest extends AbstractPendingR
         return csm.getUnrepairedUnsafe().containsSSTable(sstable);
     }
 
-    private boolean hasPendingStrategiesFor(UUID sessionID)
+    private boolean hasPendingStrategiesFor(TimeUUID sessionID)
     {
         return !Iterables.isEmpty(csm.getPendingRepairsUnsafe().getStrategiesFor(sessionID));
     }
 
-    private boolean hasTransientStrategiesFor(UUID sessionID)
+    private boolean hasTransientStrategiesFor(TimeUUID sessionID)
     {
         return !Iterables.isEmpty(csm.getTransientRepairsUnsafe().getStrategiesFor(sessionID));
     }
@@ -77,7 +83,7 @@ public class CompactionStrategyManagerPendingRepairTest extends AbstractPendingR
     @Test
     public void sstableAdded()
     {
-        UUID repairID = registerSession(cfs, true, true);
+        TimeUUID repairID = registerSession(cfs, true, true);
         LocalSessionAccessor.prepareUnsafe(repairID, COORDINATOR, PARTICIPANTS);
         Assert.assertTrue(Iterables.isEmpty(csm.getPendingRepairsUnsafe().allStrategies()));
 
@@ -103,7 +109,7 @@ public class CompactionStrategyManagerPendingRepairTest extends AbstractPendingR
     @Test
     public void sstableListChangedAddAndRemove()
     {
-        UUID repairID = registerSession(cfs, true, true);
+        TimeUUID repairID = registerSession(cfs, true, true);
         LocalSessionAccessor.prepareUnsafe(repairID, COORDINATOR, PARTICIPANTS);
 
         SSTableReader sstable1 = makeSSTable(true);
@@ -152,7 +158,7 @@ public class CompactionStrategyManagerPendingRepairTest extends AbstractPendingR
     @Test
     public void sstableRepairStatusChanged()
     {
-        UUID repairID = registerSession(cfs, true, true);
+        TimeUUID repairID = registerSession(cfs, true, true);
         LocalSessionAccessor.prepareUnsafe(repairID, COORDINATOR, PARTICIPANTS);
 
         // add as unrepaired
@@ -186,7 +192,7 @@ public class CompactionStrategyManagerPendingRepairTest extends AbstractPendingR
     @Test
     public void sstableDeleted()
     {
-        UUID repairID = registerSession(cfs, true, true);
+        TimeUUID repairID = registerSession(cfs, true, true);
         LocalSessionAccessor.prepareUnsafe(repairID, COORDINATOR, PARTICIPANTS);
 
         SSTableReader sstable = makeSSTable(true);
@@ -209,7 +215,7 @@ public class CompactionStrategyManagerPendingRepairTest extends AbstractPendingR
     @Test
     public void getStrategies()
     {
-        UUID repairID = registerSession(cfs, true, true);
+        TimeUUID repairID = registerSession(cfs, true, true);
         LocalSessionAccessor.prepareUnsafe(repairID, COORDINATOR, PARTICIPANTS);
 
         List<List<AbstractCompactionStrategy>> strategies;
@@ -232,9 +238,9 @@ public class CompactionStrategyManagerPendingRepairTest extends AbstractPendingR
      * which reclassify the sstables as repaired
      */
     @Test
-    public void cleanupCompactionFinalized()
+    public void cleanupCompactionFinalized() throws NoSuchRepairSessionException
     {
-        UUID repairID = registerSession(cfs, true, true);
+        TimeUUID repairID = registerSession(cfs, true, true);
         LocalSessionAccessor.prepareUnsafe(repairID, COORDINATOR, PARTICIPANTS);
         SSTableReader sstable = makeSSTable(true);
         mutateRepaired(sstable, repairID, false);
@@ -261,7 +267,7 @@ public class CompactionStrategyManagerPendingRepairTest extends AbstractPendingR
         Assert.assertFalse(hasTransientStrategiesFor(repairID));
 
         // sstable should have pendingRepair cleared, and repairedAt set correctly
-        long expectedRepairedAt = ActiveRepairService.instance.getParentRepairSession(repairID).repairedAt;
+        long expectedRepairedAt = ActiveRepairService.instance().getParentRepairSession(repairID).repairedAt;
         Assert.assertFalse(sstable.isPendingRepair());
         Assert.assertTrue(sstable.isRepaired());
         Assert.assertEquals(expectedRepairedAt, sstable.getSSTableMetadata().repairedAt);
@@ -274,7 +280,7 @@ public class CompactionStrategyManagerPendingRepairTest extends AbstractPendingR
     @Test
     public void cleanupCompactionFailed()
     {
-        UUID repairID = registerSession(cfs, true, true);
+        TimeUUID repairID = registerSession(cfs, true, true);
         LocalSessionAccessor.prepareUnsafe(repairID, COORDINATOR, PARTICIPANTS);
         SSTableReader sstable = makeSSTable(true);
         mutateRepaired(sstable, repairID, false);
@@ -306,11 +312,114 @@ public class CompactionStrategyManagerPendingRepairTest extends AbstractPendingR
         Assert.assertEquals(ActiveRepairService.UNREPAIRED_SSTABLE, sstable.getSSTableMetadata().repairedAt);
     }
 
+    /**
+     * Tests that finalized repairs racing with compactions on the same set of sstables don't leave unrepaired sstables behind
+     *
+     * This test checks that when a repair has been finalized but there are still pending sstables a finalize repair
+     * compaction task is issued for that repair session.
+     */
+    @Test
+    public void testFinalizedAndCompactionRace() throws NoSuchRepairSessionException
+    {
+        TimeUUID repairID = registerSession(cfs, true, true);
+        LocalSessionAccessor.prepareUnsafe(repairID, COORDINATOR, PARTICIPANTS);
+
+        int numberOfSStables = 4;
+        List<SSTableReader> sstables = new ArrayList<>(numberOfSStables);
+        for (int i = 0; i < numberOfSStables; i++)
+        {
+            SSTableReader sstable = makeSSTable(true);
+            sstables.add(sstable);
+            Assert.assertFalse(sstable.isRepaired());
+            Assert.assertFalse(sstable.isPendingRepair());
+        }
+
+        // change to pending repair
+        mutateRepaired(sstables, repairID, false);
+        csm.handleNotification(new SSTableAddedNotification(sstables, null), cfs.getTracker());
+        for (SSTableReader sstable : sstables)
+        {
+            Assert.assertFalse(sstable.isRepaired());
+            Assert.assertTrue(sstable.isPendingRepair());
+            Assert.assertEquals(repairID, sstable.getPendingRepair());
+        }
+
+        // Get a compaction taks based on the sstables marked as pending repair
+        cfs.getCompactionStrategyManager().enable();
+        for (SSTableReader sstable : sstables)
+            pendingContains(sstable);
+        AbstractCompactionTask compactionTask = csm.getNextBackgroundTask(FBUtilities.nowInSeconds());
+
+        // Finalize the repair session
+        LocalSessionAccessor.finalizeUnsafe(repairID);
+        LocalSession session = ARS.consistent.local.getSession(repairID);
+        ARS.consistent.local.sessionCompleted(session);
+
+        // run the compaction
+        if (compactionTask != null)
+        {
+            compactionTask.execute(ActiveCompactionsTracker.NOOP);
+            Assert.assertEquals(1, cfs.getLiveSSTables().size());
+        }
+
+        // The repair session is finalized but there could be an sstable left behind pending repair!
+        SSTableReader compactedSSTable = cfs.getLiveSSTables().iterator().next();
+
+        System.out.println("*********************************************************************************************");
+        System.out.println(compactedSSTable);
+        System.out.println("Pending repair UUID: " + compactedSSTable.getPendingRepair());
+        System.out.println("Repaired at: " + compactedSSTable.getRepairedAt());
+        System.out.println("Creation time: " + compactedSSTable.getDataCreationTime());
+        System.out.println("Live sstables: " + cfs.getLiveSSTables().size());
+        System.out.println("*********************************************************************************************");
+
+        // Run compaction again. It should pick up the pending repair sstable
+        compactionTask = csm.getNextBackgroundTask(FBUtilities.nowInSeconds());
+        if (compactionTask != null)
+        {
+            Assert.assertSame(PendingRepairManager.RepairFinishedCompactionTask.class, compactionTask.getClass());
+            compactionTask.execute(ActiveCompactionsTracker.NOOP);
+
+            while ((compactionTask = csm.getNextBackgroundTask(FBUtilities.nowInSeconds())) != null)
+                compactionTask.execute(ActiveCompactionsTracker.NOOP);
+        }
+
+        // Make sure you consume all pending compactions
+        Util.spinAssertEquals(Boolean.FALSE,
+                              () -> {
+                                  AbstractCompactionTask ctask;
+                                  while ((ctask = csm.getNextBackgroundTask(FBUtilities.nowInSeconds())) != null)
+                                      ctask.execute(ActiveCompactionsTracker.NOOP);
+
+                                  return hasPendingStrategiesFor(repairID);
+                              },
+                              30);
+
+        System.out.println("*********************************************************************************************");
+        System.out.println(compactedSSTable);
+        System.out.println("Pending repair UUID: " + compactedSSTable.getPendingRepair());
+        System.out.println("Repaired at: " + compactedSSTable.getRepairedAt());
+        System.out.println("Creation time: " + compactedSSTable.getDataCreationTime());
+        System.out.println("Live sstables: " + cfs.getLiveSSTables().size());
+        System.out.println("*********************************************************************************************");
+
+        Assert.assertFalse(hasPendingStrategiesFor(repairID));
+        Assert.assertFalse(hasTransientStrategiesFor(repairID));
+        Assert.assertTrue(repairedContains(compactedSSTable));
+        Assert.assertFalse(unrepairedContains(compactedSSTable));
+        Assert.assertFalse(pendingContains(compactedSSTable));
+        // sstable should have pendingRepair cleared, and repairedAt set correctly
+        long expectedRepairedAt = ActiveRepairService.instance().getParentRepairSession(repairID).repairedAt;
+        Assert.assertFalse(compactedSSTable.isPendingRepair());
+        Assert.assertTrue(compactedSSTable.isRepaired());
+        Assert.assertEquals(expectedRepairedAt, compactedSSTable.getSSTableMetadata().repairedAt);
+    }
+
     @Test
     public void finalizedSessionTransientCleanup()
     {
         Assert.assertTrue(cfs.getLiveSSTables().isEmpty());
-        UUID repairID = registerSession(cfs, true, true);
+        TimeUUID repairID = registerSession(cfs, true, true);
         LocalSessionAccessor.prepareUnsafe(repairID, COORDINATOR, PARTICIPANTS);
         SSTableReader sstable = makeSSTable(true);
         mutateRepaired(sstable, repairID, true);
@@ -341,7 +450,7 @@ public class CompactionStrategyManagerPendingRepairTest extends AbstractPendingR
     public void failedSessionTransientCleanup()
     {
         Assert.assertTrue(cfs.getLiveSSTables().isEmpty());
-        UUID repairID = registerSession(cfs, true, true);
+        TimeUUID repairID = registerSession(cfs, true, true);
         LocalSessionAccessor.prepareUnsafe(repairID, COORDINATOR, PARTICIPANTS);
         SSTableReader sstable = makeSSTable(true);
         mutateRepaired(sstable, repairID, true);

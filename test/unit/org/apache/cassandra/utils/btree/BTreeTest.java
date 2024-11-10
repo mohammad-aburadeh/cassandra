@@ -25,17 +25,17 @@ import org.junit.Test;
 
 import org.junit.Assert;
 
+import static org.apache.cassandra.config.CassandraRelevantProperties.BTREE_BRANCH_SHIFT;
 import static org.junit.Assert.*;
-import static org.junit.Assert.assertEquals;
 
 public class BTreeTest
 {
     static Integer[] ints = new Integer[20];
     static
     {
-        System.setProperty("cassandra.btree.branchshift", "2");
+        BTREE_BRANCH_SHIFT.setInt(2);
         for (int i = 0 ; i < ints.length ; i++)
-            ints[i] = new Integer(i);
+            ints[i] = Integer.valueOf(i);
     }
 
     static final UpdateFunction<Integer, Integer> updateF = new UpdateFunction<Integer, Integer>()

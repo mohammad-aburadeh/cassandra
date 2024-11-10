@@ -18,34 +18,29 @@
 
 package org.apache.cassandra.distributed.impl;
 
-import java.io.File;
 import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
+import java.nio.file.Path;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.EnumSet;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.UUID;
 import java.util.function.Function;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import java.util.stream.Collectors;
 
 import com.vdurmont.semver4j.Semver;
+import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.distributed.api.Feature;
 import org.apache.cassandra.distributed.api.IInstanceConfig;
 import org.apache.cassandra.distributed.shared.NetworkTopology;
 import org.apache.cassandra.distributed.upgrade.UpgradeTestBase;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.locator.SimpleSeedProvider;
-import org.apache.cassandra.utils.Shared;
 
-@Shared
 public class InstanceConfig implements IInstanceConfig
 {
-    private static final Object NULL = new Object();
-    private static final Logger logger = LoggerFactory.getLogger(InstanceConfig.class);
-
     public final int num;
     private final int jmxPort;
 
@@ -77,15 +72,17 @@ public class InstanceConfig implements IInstanceConfig
                            String commitlog_directory,
                            String hints_directory,
                            String cdc_raw_directory,
-                           String initial_token,
+                           Collection<String> initial_token,
                            int storage_port,
                            int native_transport_port,
                            int jmx_port)
     {
         this.num = num;
         this.networkTopology = networkTopology;
-        this.hostId = java.util.UUID.randomUUID();
-        this    .set("num_tokens", 1)
+        this.hostId = new UUID(0x4000L, (1L << 63) | num); // deterministic hostId for simulator
+        //TODO move away from magic strings in favor of constants
+        this    .set("num_tokens", initial_token.size())
+                .set("initial_token", initial_token.stream().collect(Collectors.joining(",")))
                 .set("broadcast_address", broadcast_address)
                 .set("listen_address", listen_address)
                 .set("broadcast_rpc_address", broadcast_rpc_address)
@@ -95,7 +92,6 @@ public class InstanceConfig implements IInstanceConfig
                 .set("commitlog_directory", commitlog_directory)
                 .set("hints_directory", hints_directory)
                 .set("cdc_raw_directory", cdc_raw_directory)
-                .set("initial_token", initial_token)
                 .set("partitioner", "org.apache.cassandra.dht.Murmur3Partitioner")
                 .set("start_native_transport", true)
                 .set("concurrent_writes", 2)
@@ -104,22 +100,71 @@ public class InstanceConfig implements IInstanceConfig
                 .set("concurrent_reads", 2)
                 .set("memtable_flush_writers", 1)
                 .set("concurrent_compactors", 1)
-                .set("memtable_heap_space_in_mb", 10)
-                .set("commitlog_sync", "batch")
+                .set("memtable_heap_space", "10MiB")
+                .set("commitlog_sync", "periodic")
+                .set("commitlog_sync_period_in_ms", 10000)
                 .set("storage_port", storage_port)
                 .set("native_transport_port", native_transport_port)
                 .set("endpoint_snitch", DistributedTestSnitch.class.getName())
                 .set("seed_provider", new ParameterizedClass(SimpleSeedProvider.class.getName(),
                         Collections.singletonMap("seeds", seedIp + ':' + seedPort)))
+                .set("discovery_timeout", "3s")
                 // required settings for dtest functionality
                 .set("diagnostic_events_enabled", true)
                 .set("auto_bootstrap", false)
                 // capacities that are based on `totalMemory` that should be fixed size
-                .set("index_summary_capacity_in_mb", 50l)
-                .set("counter_cache_size_in_mb", 50l)
-                .set("key_cache_size_in_mb", 50l)
-                // legacy parameters
-                .forceSet("commitlog_sync_batch_window_in_ms", 1.0);
+                .set("index_summary_capacity", "50MiB")
+                .set("counter_cache_size", "50MiB")
+                .set("key_cache_size", "50MiB")
+                .set("commitlog_disk_access_mode", "legacy");
+        if (CassandraRelevantProperties.DTEST_JVM_DTESTS_USE_LATEST.getBoolean())
+        {
+            // TODO: make this load latest_diff.yaml or cassandra_latest.yaml
+            this.set("memtable", Map.of(
+                "configurations", Map.of(
+                    "default", Map.of(
+                        "class_name", "TrieMemtable"))))
+
+                .set("batchlog_endpoint_strategy", "dynamic_remote")
+
+                .set("authenticator", Map.of("class_name", "AllowAllAuthenticator"))
+                .set("authorizer", Map.of("class_name", "AllowAllAuthorizer"))
+                .set("role_manager", Map.of("class_name", "CassandraRoleManager"))
+                .set("network_authorizer", Map.of("class_name", "AllowAllNetworkAuthorizer"))
+
+                .set("key_cache_size", "0MiB")
+
+                .set("memtable_allocation_type", "offheap_objects")
+
+                .set("commitlog_disk_access_mode", "auto")
+
+                .set("trickle_fsync", "true")
+
+                .set("sstable", Map.of(
+                    "selected_format", "bti"))
+
+                .set("column_index_size", "4KiB")
+
+                .set("default_compaction", Map.of(
+                    "class_name", "UnifiedCompactionStrategy",
+                    "parameters", Map.of(
+                        "scaling_parameters", "T4",
+                        "max_sstables_to_compact", "64",
+                        "target_sstable_size", "1GiB",
+                        "sstable_growth","0.3333333333333333",
+                        "min_sstable_size", "100MiB")))
+
+                .set("concurrent_compactors", "8")
+
+                .set("uuid_sstable_identifiers_enabled", "true")
+
+                .set("stream_entire_sstables", "true")
+
+                .set("default_secondary_index", "sai")
+                .set("default_secondary_index_enabled", "true")
+
+                .set("storage_compatibility_mode", "NONE");
+        }
         this.featureFlags = EnumSet.noneOf(Feature.class);
         this.jmxPort = jmx_port;
     }
@@ -135,7 +180,6 @@ public class InstanceConfig implements IInstanceConfig
         this.broadcastAddressAndPort = copy.broadcastAddressAndPort;
         this.jmxPort = copy.jmxPort;
     }
-
 
     @Override
     public InetSocketAddress broadcastAddress()
@@ -205,18 +249,18 @@ public class InstanceConfig implements IInstanceConfig
 
     public InstanceConfig set(String fieldName, Object value)
     {
-        if (value == null)
-            value = NULL;
         getParams(fieldName).put(fieldName, value);
+        return this;
+    }
+
+    public InstanceConfig remove(String fieldName)
+    {
+        getParams(fieldName).remove(fieldName);
         return this;
     }
 
     public InstanceConfig forceSet(String fieldName, Object value)
     {
-        if (value == null)
-            value = NULL;
-
-        // test value
         getParams(fieldName).put(fieldName, value);
         return this;
     }
@@ -234,10 +278,12 @@ public class InstanceConfig implements IInstanceConfig
         throw new IllegalStateException("In-JVM dtests no longer support propagate");
     }
 
+    @Override
     public void validate()
     {
-        if (((int) get("num_tokens")) > 1)
-            throw new IllegalArgumentException("In-JVM dtests do not support vnodes as of now.");
+        // Previous logic would validate vnode was not used, but with vnode support added that validation isn't needed.
+        // Rather than attempting validating the configs here, its best to leave that to the instance; this method
+        // is no longer really needed, but can not be removed due to backwards compatability.
     }
 
     public Object get(String name)
@@ -263,32 +309,33 @@ public class InstanceConfig implements IInstanceConfig
     public static InstanceConfig generate(int nodeNum,
                                           INodeProvisionStrategy provisionStrategy,
                                           NetworkTopology networkTopology,
-                                          File root,
-                                          String token,
+                                          Path root,
+                                          Collection<String> tokens,
                                           int datadirCount)
     {
+        int seedNode = provisionStrategy.seedNodeNum();
         return new InstanceConfig(nodeNum,
                                   networkTopology,
                                   provisionStrategy.ipAddress(nodeNum),
                                   provisionStrategy.ipAddress(nodeNum),
                                   provisionStrategy.ipAddress(nodeNum),
                                   provisionStrategy.ipAddress(nodeNum),
-                                  provisionStrategy.seedIp(),
-                                  provisionStrategy.seedPort(),
+                                  provisionStrategy.ipAddress(seedNode),
+                                  provisionStrategy.storagePort(seedNode),
                                   String.format("%s/node%d/saved_caches", root, nodeNum),
                                   datadirs(datadirCount, root, nodeNum),
                                   String.format("%s/node%d/commitlog", root, nodeNum),
                                   String.format("%s/node%d/hints", root, nodeNum),
                                   String.format("%s/node%d/cdc", root, nodeNum),
-                                  token,
+                                  tokens,
                                   provisionStrategy.storagePort(nodeNum),
                                   provisionStrategy.nativeTransportPort(nodeNum),
                                   provisionStrategy.jmxPort(nodeNum));
     }
 
-    private static String[] datadirs(int datadirCount, File root, int nodeNum)
+    private static String[] datadirs(int datadirCount, Path root, int nodeNum)
     {
-        String datadirFormat = String.format("%s/node%d/data%%d", root.getPath(), nodeNum);
+        String datadirFormat = String.format("%s/node%d/data%%d", root, nodeNum);
         String [] datadirs = new String[datadirCount];
         for (int i = 0; i < datadirs.length; i++)
             datadirs[i] = String.format(datadirFormat, i);

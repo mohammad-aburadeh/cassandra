@@ -23,8 +23,6 @@ import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.UnknownHostException;
 
-import com.google.common.base.Throwables;
-
 public class SocketUtils
 {
     /**

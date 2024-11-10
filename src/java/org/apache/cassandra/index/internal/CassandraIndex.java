@@ -23,18 +23,16 @@ package org.apache.cassandra.index.internal;
 import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.concurrent.Callable;
-import java.util.function.BiFunction;
+import java.util.concurrent.Future;
 import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
 
 import com.google.common.collect.ImmutableSet;
-import com.google.common.util.concurrent.FutureCallback;
-import com.google.common.util.concurrent.Futures;
-import com.google.common.util.concurrent.ListenableFuture;
-import com.google.common.util.concurrent.MoreExecutors;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.Operator;
 import org.apache.cassandra.cql3.statements.schema.IndexTarget;
 import org.apache.cassandra.db.*;
@@ -44,7 +42,7 @@ import org.apache.cassandra.db.lifecycle.SSTableSet;
 import org.apache.cassandra.db.lifecycle.View;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.CollectionType;
-import org.apache.cassandra.db.partitions.PartitionIterator;
+import org.apache.cassandra.db.memtable.Memtable;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.db.rows.*;
 import org.apache.cassandra.dht.LocalPartitioner;
@@ -53,13 +51,12 @@ import org.apache.cassandra.index.*;
 import org.apache.cassandra.index.internal.composites.CompositesSearcher;
 import org.apache.cassandra.index.internal.keys.KeysSearcher;
 import org.apache.cassandra.index.transactions.IndexTransaction;
-import org.apache.cassandra.index.transactions.UpdateTransaction;
 import org.apache.cassandra.io.sstable.ReducingKeyIterator;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.IndexMetadata;
 import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.schema.TableMetadataRef;
+import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.Pair;
 import org.apache.cassandra.utils.concurrent.Refs;
@@ -72,6 +69,8 @@ import static org.apache.cassandra.cql3.statements.RequestValidations.checkFalse
  */
 public abstract class CassandraIndex implements Index
 {
+    public static final String NAME = "legacy_local_table";
+    
     private static final Logger logger = LoggerFactory.getLogger(CassandraIndex.class);
 
     public final ColumnFamilyStore baseCfs;
@@ -130,7 +129,7 @@ public abstract class CassandraIndex implements Index
      * @param nowInSec
      * @return true if the index is out of date and the entry should be dropped
      */
-    public abstract boolean isStale(Row row, ByteBuffer indexValue, int nowInSec);
+    public abstract boolean isStale(Row row, ByteBuffer indexValue, long nowInSec);
 
     /**
      * Extract the value to be inserted into the index from the components of the base data
@@ -145,7 +144,7 @@ public abstract class CassandraIndex implements Index
                                                   Clustering<?> clustering,
                                                   CellPath path,
                                                   ByteBuffer cellValue);
-    
+
     public ColumnMetadata getIndexedColumn()
     {
         return indexedColumn;
@@ -186,7 +185,7 @@ public abstract class CassandraIndex implements Index
     public Callable<Void> getBlockingFlushTask()
     {
         return () -> {
-            indexCfs.forceBlockingFlush();
+            indexCfs.forceBlockingFlush(ColumnFamilyStore.FlushReason.INDEX_TABLE_FLUSH);
             return null;
         };
     }
@@ -202,9 +201,16 @@ public abstract class CassandraIndex implements Index
     public Callable<?> getMetadataReloadTask(IndexMetadata indexDef)
     {
         return () -> {
-            indexCfs.reload();
+            indexCfs.reload(indexCfs.metadata());
             return null;
         };
+    }
+
+    @Override
+    public boolean isQueryable(Status status)
+    {
+        // consider unknown status as queryable, because gossip may not be up-to-date for newly joining nodes.
+        return status == Status.BUILD_SUCCEEDED || status == Status.UNKNOWN || status == Status.FULL_REBUILD_STARTED;
     }
 
     @Override
@@ -225,10 +231,10 @@ public abstract class CassandraIndex implements Index
         metadata = indexDef;
         Pair<ColumnMetadata, IndexTarget.Type> target = TargetParser.parse(baseCfs.metadata(), indexDef);
         functions = getFunctions(indexDef, target);
-        TableMetadataRef tableRef = TableMetadataRef.forOfflineTools(indexCfsMetadata(baseCfs.metadata(), indexDef));
+        TableMetadata tm = indexCfsMetadata(baseCfs.metadata(), indexDef);
         indexCfs = ColumnFamilyStore.createColumnFamilyStore(baseCfs.keyspace,
-                                                             tableRef.name,
-                                                             tableRef,
+                                                             tm.name,
+                                                             tm,
                                                              baseCfs.getTracker().loadsstables);
         indexedColumn = target.left;
     }
@@ -273,14 +279,6 @@ public abstract class CassandraIndex implements Index
         return indexCfs.getMeanRowCount();
     }
 
-    /**
-     * No post processing of query results, just return them unchanged
-     */
-    public BiFunction<PartitionIterator, ReadCommand, PartitionIterator> postProcessorFor(ReadCommand command)
-    {
-        return (partitionIterator, readCommand) -> partitionIterator;
-    }
-
     public RowFilter getPostIndexQueryFilter(RowFilter filter)
     {
         return getTargetExpression(filter.getExpressions()).map(filter::without)
@@ -317,7 +315,8 @@ public abstract class CassandraIndex implements Index
 
     }
 
-    public void validate(PartitionUpdate update) throws InvalidRequestException
+    @Override
+    public void validate(PartitionUpdate update, ClientState state) throws InvalidRequestException
     {
         switch (indexedColumn.kind)
         {
@@ -340,11 +339,12 @@ public abstract class CassandraIndex implements Index
 
     public Indexer indexerFor(final DecoratedKey key,
                               final RegularAndStaticColumns columns,
-                              final int nowInSec,
+                              final long nowInSec,
                               final WriteContext ctx,
-                              final IndexTransaction.Type transactionType)
+                              final IndexTransaction.Type transactionType,
+                              Memtable memtable)
     {
-        /**
+        /*
          * Indexes on regular and static columns (the non primary-key ones) only care about updates with live
          * data for the column they index. In particular, they don't care about having just row or range deletions
          * as they don't know how to update the index table unless they know exactly the value that is deleted.
@@ -526,7 +526,7 @@ public abstract class CassandraIndex implements Index
                                                                cell));
         Row row = BTreeRow.noCellLiveRow(buildIndexClustering(rowKey, clustering, cell), info);
         PartitionUpdate upd = partitionUpdate(valueKey, row);
-        indexCfs.getWriteHandler().write(upd, ctx, UpdateTransaction.NO_OP);
+        indexCfs.getWriteHandler().write(upd, ctx, false);
         logger.trace("Inserted entry into index for value {}", valueKey);
     }
 
@@ -537,14 +537,14 @@ public abstract class CassandraIndex implements Index
                         Clustering<?> clustering,
                         Cell<?> cell,
                         WriteContext ctx,
-                        int nowInSec)
+                        long nowInSec)
     {
         DecoratedKey valueKey = getIndexKeyFor(getIndexedValue(rowKey,
                                                                clustering,
                                                                cell));
         doDelete(valueKey,
                  buildIndexClustering(rowKey, clustering, cell),
-                 new DeletionTime(cell.timestamp(), nowInSec),
+                 DeletionTime.build(cell.timestamp(), nowInSec),
                  ctx);
     }
 
@@ -572,7 +572,7 @@ public abstract class CassandraIndex implements Index
     {
         Row row = BTreeRow.emptyDeletedRow(indexClustering, Row.Deletion.regular(deletion));
         PartitionUpdate upd = partitionUpdate(indexKey, row);
-        indexCfs.getWriteHandler().write(upd, ctx, UpdateTransaction.NO_OP);
+        indexCfs.getWriteHandler().write(upd, ctx, false);
         logger.trace("Removed index entry for value {}", indexKey);
     }
 
@@ -661,14 +661,14 @@ public abstract class CassandraIndex implements Index
         CompactionManager.instance.interruptCompactionForCFs(cfss, (sstable) -> true, true);
         CompactionManager.instance.waitForCessation(cfss, (sstable) -> true);
         Keyspace.writeOrder.awaitNewBarrier();
-        indexCfs.forceBlockingFlush();
+        indexCfs.forceBlockingFlush(ColumnFamilyStore.FlushReason.INDEX_REMOVED);
         indexCfs.readOrdering.awaitNewBarrier();
         indexCfs.invalidate();
     }
 
     private boolean isBuilt()
     {
-        return SystemKeyspace.isIndexBuilt(baseCfs.keyspace.getName(), metadata.name);
+        return SystemKeyspace.isIndexBuilt(baseCfs.getKeyspaceName(), metadata.name);
     }
 
     private boolean isPrimaryKeyIndex()
@@ -684,10 +684,9 @@ public abstract class CassandraIndex implements Index
         };
     }
 
-    @SuppressWarnings("resource")
     private void buildBlocking()
     {
-        baseCfs.forceBlockingFlush();
+        baseCfs.forceBlockingFlush(ColumnFamilyStore.FlushReason.INDEX_BUILD_STARTED);
 
         try (ColumnFamilyStore.RefViewFragment viewFragment = baseCfs.selectAndReference(View.selectFunction(SSTableSet.CANONICAL));
              Refs<SSTableReader> sstables = viewFragment.refs)
@@ -705,27 +704,13 @@ public abstract class CassandraIndex implements Index
                         metadata.name,
                         getSSTableNames(sstables));
 
-            CollatedViewIndexBuilder builder = new CollatedViewIndexBuilder(baseCfs,
-                                                                            Collections.singleton(this),
-                                                                            new ReducingKeyIterator(sstables),
-                                                                            ImmutableSet.copyOf(sstables));
-            ListenableFuture<?> future = CompactionManager.instance.submitIndexBuild(builder);
-            Futures.addCallback(future, new FutureCallback<Object>()
-            {
-                @Override
-                public void onSuccess(Object o)
-                {
-                    builder.close();
-                }
-
-                @Override
-                public void onFailure(Throwable throwable)
-                {
-                    builder.close();
-                }
-            }, MoreExecutors.directExecutor());
+            SecondaryIndexBuilder builder = new CollatedViewIndexBuilder(baseCfs,
+                                                                         Collections.singleton(this),
+                                                                         new ReducingKeyIterator(sstables),
+                                                                         ImmutableSet.copyOf(sstables));
+            Future<?> future = CompactionManager.instance.submitIndexBuild(builder);
             FBUtilities.waitOnFuture(future);
-            indexCfs.forceBlockingFlush();
+            indexCfs.forceBlockingFlush(ColumnFamilyStore.FlushReason.INDEX_BUILD_COMPLETED);
         }
         logger.info("Index build of {} complete", metadata.name);
     }
@@ -751,12 +736,15 @@ public abstract class CassandraIndex implements Index
         ColumnMetadata indexedColumn = target.left;
         AbstractType<?> indexedValueType = utils.getIndexedValueType(indexedColumn);
 
+        // if Cassandra's major version is before 5, use the old behaviour
+        boolean isCompatible = DatabaseDescriptor.getStorageCompatibilityMode().isBefore(5);
+        AbstractType<?> indexedTablePartitionKeyType = baseCfsMetadata.partitioner.partitionOrdering(baseCfsMetadata.partitionKeyType);
         TableMetadata.Builder builder =
             TableMetadata.builder(baseCfsMetadata.keyspace, baseCfsMetadata.indexTableName(indexMetadata), baseCfsMetadata.id)
                          .kind(TableMetadata.Kind.INDEX)
                          .partitioner(new LocalPartitioner(indexedValueType))
-                         .addPartitionKeyColumn(indexedColumn.name, indexedColumn.type)
-                         .addClusteringColumn("partition_key", baseCfsMetadata.partitioner.partitionOrdering());
+                         .addPartitionKeyColumn(indexedColumn.name, isCompatible ? indexedColumn.type : utils.getIndexedPartitionKeyType(indexedColumn))
+                         .addClusteringColumn("partition_key", isCompatible ? baseCfsMetadata.partitioner.partitionOrdering() : indexedTablePartitionKeyType);
 
         // Adding clustering columns, which depends on the index type.
         builder = utils.addIndexClusteringColumns(builder, baseCfsMetadata, indexedColumn);

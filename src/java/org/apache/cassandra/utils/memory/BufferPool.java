@@ -37,8 +37,9 @@ import java.util.function.Supplier;
 
 import com.google.common.annotations.VisibleForTesting;
 
+import jdk.internal.ref.Cleaner;
 import net.nicoulaj.compilecommand.annotations.Inline;
-import org.apache.cassandra.concurrent.InfiniteLoopExecutor;
+import org.apache.cassandra.concurrent.Shutdownable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -48,11 +49,17 @@ import org.apache.cassandra.io.compress.BufferType;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.metrics.BufferPoolMetrics;
 import org.apache.cassandra.utils.NoSpamLogger;
+import org.apache.cassandra.utils.Shared;
 import org.apache.cassandra.utils.concurrent.Ref;
+import org.apache.cassandra.utils.concurrent.Ref.DirectBufferRef;
+import sun.nio.ch.DirectBuffer;
 
 import static com.google.common.collect.ImmutableList.of;
+import static org.apache.cassandra.concurrent.ExecutorFactory.Global.executorFactory;
+import static org.apache.cassandra.concurrent.InfiniteLoopExecutor.SimulatorSafe.UNSAFE;
 import static org.apache.cassandra.utils.ExecutorUtils.*;
 import static org.apache.cassandra.utils.FBUtilities.prettyPrintMemory;
+import static org.apache.cassandra.utils.Shared.Scope.SIMULATION;
 import static org.apache.cassandra.utils.memory.MemoryUtil.isExactlyDirect;
 
 /**
@@ -129,6 +136,7 @@ public class BufferPool
     private static final ByteBuffer EMPTY_BUFFER = ByteBuffer.allocateDirect(0);
 
     private volatile Debug debug = Debug.NO_OP;
+    private volatile DebugLeaks debugLeaks = DebugLeaks.NO_OP;
 
     protected final String name;
     protected final BufferPoolMetrics metrics;
@@ -174,7 +182,7 @@ public class BufferPool
     private final Set<LocalPoolRef> localPoolReferences = Collections.newSetFromMap(new ConcurrentHashMap<>());
 
     private final ReferenceQueue<Object> localPoolRefQueue = new ReferenceQueue<>();
-    private final InfiniteLoopExecutor localPoolCleaner;
+    private final Shutdownable localPoolCleaner;
 
     public BufferPool(String name, long memoryUsageThreshold, boolean recyclePartially)
     {
@@ -184,7 +192,7 @@ public class BufferPool
         this.globalPool = new GlobalPool();
         this.metrics = new BufferPoolMetrics(name, this);
         this.recyclePartially = recyclePartially;
-        this.localPoolCleaner = new InfiniteLoopExecutor("LocalPool-Cleaner-" + name, this::cleanupOneReference).start();
+        this.localPoolCleaner = executorFactory().infiniteLoop("LocalPool-Cleaner-" + name, this::cleanupOneReference, UNSAFE);
     }
 
     /**
@@ -331,10 +339,19 @@ public class BufferPool
         void recyclePartial(Chunk chunk);
     }
 
-    public void debug(Debug setDebug)
+    @Shared(scope = SIMULATION)
+    public interface DebugLeaks
     {
-        assert setDebug != null;
-        this.debug = setDebug;
+        public static DebugLeaks NO_OP = () -> {};
+        void leak();
+    }
+
+    public void debug(Debug newDebug, DebugLeaks newDebugLeaks)
+    {
+        if (newDebug != null)
+            this.debug = newDebug;
+        if (newDebugLeaks != null)
+            this.debugLeaks = newDebugLeaks;
     }
 
     interface Recycler
@@ -1069,6 +1086,7 @@ public class BufferPool
         Object obj = localPoolRefQueue.remove(100);
         if (obj instanceof LocalPoolRef)
         {
+            debugLeaks.leak();
             ((LocalPoolRef) obj).release();
             localPoolReferences.remove(obj);
         }
@@ -1114,7 +1132,7 @@ public class BufferPool
      * When we reiceve a release request we work out the position by comparing the buffer
      * address to our base address and we simply release the units.
      */
-    final static class Chunk
+    final static class Chunk implements DirectBuffer
     {
         enum Status
         {
@@ -1167,6 +1185,24 @@ public class BufferPool
             this.shift = 31 & (Integer.numberOfTrailingZeros(slab.capacity() / 64));
             // -1 means all free whilst 0 means all in use
             this.freeSlots = slab.capacity() == 0 ? 0L : -1L;
+        }
+
+        @Override
+        public long address()
+        {
+            return baseAddress;
+        }
+
+        @Override
+        public Object attachment()
+        {
+            return MemoryUtil.getAttachment(slab);
+        }
+
+        @Override
+        public Cleaner cleaner()
+        {
+            return null;
         }
 
         /**
@@ -1286,8 +1322,8 @@ public class BufferPool
             if (attachment instanceof Chunk)
                 return (Chunk) attachment;
 
-            if (attachment instanceof Ref)
-                return ((Ref<Chunk>) attachment).get();
+            if (attachment instanceof DirectBufferRef)
+                return ((DirectBufferRef<Chunk>) attachment).get();
 
             return null;
         }
@@ -1295,7 +1331,7 @@ public class BufferPool
         void setAttachment(ByteBuffer buffer)
         {
             if (Ref.DEBUG_ENABLED)
-                MemoryUtil.setAttachment(buffer, new Ref<>(this, null));
+                MemoryUtil.setAttachment(buffer, new DirectBufferRef<>(this, null));
             else
                 MemoryUtil.setAttachment(buffer, this);
         }
@@ -1307,7 +1343,7 @@ public class BufferPool
                 return false;
 
             if (Ref.DEBUG_ENABLED)
-                ((Ref<Chunk>) attachment).release();
+                ((DirectBufferRef<Chunk>) attachment).release();
 
             return true;
         }
@@ -1578,8 +1614,7 @@ public class BufferPool
     @VisibleForTesting
     public void shutdownLocalCleaner(long timeout, TimeUnit unit) throws InterruptedException, TimeoutException
     {
-        shutdownNow(of(localPoolCleaner));
-        awaitTermination(timeout, unit, of(localPoolCleaner));
+        shutdownAndWait(timeout, unit, of(localPoolCleaner));
     }
 
     @VisibleForTesting

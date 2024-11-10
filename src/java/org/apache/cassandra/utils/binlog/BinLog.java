@@ -18,7 +18,6 @@
 
 package org.apache.cassandra.utils.binlog;
 
-import java.io.File;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -32,9 +31,11 @@ import java.util.function.Function;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
+import org.apache.cassandra.io.util.File;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import net.openhft.chronicle.core.io.BackgroundResourceReleaser;
 import net.openhft.chronicle.queue.ChronicleQueue;
 import net.openhft.chronicle.queue.impl.single.SingleChronicleQueue;
 import net.openhft.chronicle.queue.impl.single.SingleChronicleQueueBuilder;
@@ -42,15 +43,18 @@ import net.openhft.chronicle.queue.ExcerptAppender;
 import net.openhft.chronicle.queue.RollCycles;
 import net.openhft.chronicle.wire.WireOut;
 import net.openhft.chronicle.wire.WriteMarshallable;
+import net.openhft.posix.PosixAPI;
 import org.apache.cassandra.concurrent.NamedThreadFactory;
 import org.apache.cassandra.io.FSError;
-import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.utils.JVMStabilityInspector;
 import org.apache.cassandra.utils.NoSpamLogger;
 import org.apache.cassandra.utils.Throwables;
+import org.apache.cassandra.utils.concurrent.UncheckedInterruptedException;
 import org.apache.cassandra.utils.concurrent.WeightedQueue;
 
 import static java.lang.String.format;
+import static org.apache.cassandra.config.CassandraRelevantProperties.CHRONICLE_ANNOUNCER_DISABLE;
+import static org.apache.cassandra.utils.LocalizeString.toUpperCaseLocalized;
 
 /**
  * Bin log is a is quick and dirty binary log that is kind of a NIH version of binary logging with a traditional logging
@@ -74,6 +78,13 @@ public class BinLog implements Runnable
 
     public static final String VERSION = "version";
     public static final String TYPE = "type";
+
+    static
+    {
+        // Avoid the chronicle announcement which is commercial advertisement, and debug info we already print at startup
+        // https://github.com/OpenHFT/Chronicle-Core/blob/chronicle-core-2.23.36/src/main/java/net/openhft/chronicle/core/announcer/Announcer.java#L32-L33
+        CHRONICLE_ANNOUNCER_DISABLE.setBoolean(true);
+    }
 
     private ChronicleQueue queue;
     private ExcerptAppender appender;
@@ -122,10 +133,11 @@ public class BinLog implements Runnable
 
     private BinLog(Path path, BinLogOptions options, BinLogArchiver archiver)
     {
+        Preconditions.checkNotNull(PosixAPI.posix(), "Cannot initialize OpenHFT Posix");
         Preconditions.checkNotNull(path, "path was null");
         Preconditions.checkNotNull(options.roll_cycle, "roll_cycle was null");
         Preconditions.checkArgument(options.max_queue_weight > 0, "max_queue_weight must be > 0");
-        SingleChronicleQueueBuilder builder = SingleChronicleQueueBuilder.single(path.toFile());
+        SingleChronicleQueueBuilder builder = SingleChronicleQueueBuilder.single(path.toFile()); // checkstyle: permit this invocation
         builder.rollCycle(RollCycles.valueOf(options.roll_cycle));
 
         sampleQueue = new WeightedQueue<>(options.max_queue_weight);
@@ -135,7 +147,6 @@ public class BinLog implements Runnable
         appender = queue.acquireAppender();
         this.blocking = options.block;
         this.path = path;
-
         this.options = options;
     }
 
@@ -170,6 +181,7 @@ public class BinLog implements Runnable
 
         shouldContinue = false;
         sampleQueue.put(NO_OP);
+        BackgroundResourceReleaser.stop();
         binLogThread.join();
         appender.close();
         appender = null;
@@ -295,7 +307,7 @@ public class BinLog implements Runnable
                 }
                 catch (InterruptedException e)
                 {
-                    throw new RuntimeException(e);
+                    throw new UncheckedInterruptedException(e);
                 }
             }
             else
@@ -366,11 +378,11 @@ public class BinLog implements Runnable
         public Builder path(Path path)
         {
             Preconditions.checkNotNull(path, "path was null");
-            File pathAsFile = path.toFile();
+            File pathAsFile = new File(path);
             //Exists and is a directory or can be created
             Preconditions.checkArgument(!pathAsFile.toString().isEmpty(), "you might have forgotten to specify a directory to save logs");
-            Preconditions.checkArgument((pathAsFile.exists() && pathAsFile.isDirectory()) || (!pathAsFile.exists() && pathAsFile.mkdirs()), "path exists and is not a directory or couldn't be created");
-            Preconditions.checkArgument(pathAsFile.canRead() && pathAsFile.canWrite() && pathAsFile.canExecute(), "path is not readable, writable, and executable");
+            Preconditions.checkArgument((pathAsFile.exists() && pathAsFile.isDirectory()) || (!pathAsFile.exists() && pathAsFile.tryCreateDirectories()), "path exists and is not a directory or couldn't be created");
+            Preconditions.checkArgument(pathAsFile.isReadable() && pathAsFile.isWritable() && pathAsFile.isExecutable(), "path is not readable, writable, and executable");
             this.path = path;
             return this;
         }
@@ -378,7 +390,7 @@ public class BinLog implements Runnable
         public Builder rollCycle(String rollCycle)
         {
             Preconditions.checkNotNull(rollCycle, "rollCycle was null");
-            rollCycle = rollCycle.toUpperCase();
+            rollCycle = toUpperCaseLocalized(rollCycle);
             Preconditions.checkNotNull(RollCycles.valueOf(rollCycle), "unrecognized roll cycle");
             this.rollCycle = rollCycle;
             return this;
@@ -428,7 +440,7 @@ public class BinLog implements Runnable
             }
             try
             {
-                Throwable sanitationThrowable = cleanEmptyLogFiles(path.toFile(), null);
+                Throwable sanitationThrowable = cleanEmptyLogFiles(new File(path), null);
                 if (sanitationThrowable != null)
                     throw new RuntimeException(format("Unable to clean up %s directory from empty %s files.",
                                                       path.toAbsolutePath(), SingleChronicleQueue.SUFFIX),
@@ -439,9 +451,9 @@ public class BinLog implements Runnable
                 if (cleanDirectory)
                 {
                     logger.info("Cleaning directory: {} as requested", path);
-                    if (path.toFile().exists())
+                    if (new File(path).exists())
                     {
-                        Throwable error = cleanDirectory(path.toFile(), null);
+                        Throwable error = cleanDirectory(new File(path), null);
                         if (error != null)
                         {
                             throw new RuntimeException(error);
@@ -476,14 +488,14 @@ public class BinLog implements Runnable
     private static Throwable cleanEmptyLogFiles(File directory, Throwable accumulate)
     {
         return cleanDirectory(directory, accumulate,
-                              (dir) -> dir.listFiles(file -> {
+                              (dir) -> dir.tryList(file -> {
                                   boolean foundEmptyCq4File = !file.isDirectory()
                                                               && file.length() == 0
-                                                              && file.getName().endsWith(SingleChronicleQueue.SUFFIX);
+                                                              && file.name().endsWith(SingleChronicleQueue.SUFFIX);
 
                                   if (foundEmptyCq4File)
                                       logger.warn("Found empty ChronicleQueue file {}. This file wil be deleted as part of BinLog initialization.",
-                                                  file.getAbsolutePath());
+                                                  file.absolutePath());
 
                                   return foundEmptyCq4File;
                               }));
@@ -491,7 +503,7 @@ public class BinLog implements Runnable
 
     public static Throwable cleanDirectory(File directory, Throwable accumulate)
     {
-        return cleanDirectory(directory, accumulate, File::listFiles);
+        return cleanDirectory(directory, accumulate, File::tryList);
     }
 
     private static Throwable cleanDirectory(File directory, Throwable accumulate, Function<File, File[]> lister)
@@ -517,12 +529,12 @@ public class BinLog implements Runnable
     {
         if (fileOrDirectory.isDirectory())
         {
-            File[] files = fileOrDirectory.listFiles();
+            File[] files = fileOrDirectory.tryList();
             if (files != null)
                 for (File f : files)
-                    accumulate = FileUtils.deleteWithConfirm(f, accumulate);
+                    accumulate = f.delete(accumulate, null);
         }
-        return FileUtils.deleteWithConfirm(fileOrDirectory, accumulate);
+        return fileOrDirectory.delete(accumulate, null);
     }
 
     private static Throwable checkDirectory(File directory, Throwable accumulate)

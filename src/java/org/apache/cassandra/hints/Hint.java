@@ -19,25 +19,28 @@ package org.apache.cassandra.hints;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Throwables;
-
-import javax.annotation.Nullable;
-
 import com.google.common.primitives.Ints;
 
-import org.apache.cassandra.db.*;
+import javax.annotation.Nullable;
+import org.apache.cassandra.db.Mutation;
+import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.io.IVersionedSerializer;
 import org.apache.cassandra.io.util.DataInputBuffer;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.schema.TableId;
+import org.apache.cassandra.utils.concurrent.Future;
+import org.apache.cassandra.utils.concurrent.ImmediateFuture;
 import org.apache.cassandra.utils.vint.VIntCoding;
 
+import static org.apache.cassandra.config.CassandraRelevantProperties.CASSANDRA_MAX_HINT_TTL;
 import static org.apache.cassandra.db.TypeSizes.sizeof;
 import static org.apache.cassandra.db.TypeSizes.sizeofUnsignedVInt;
+import static org.apache.cassandra.utils.Clock.Global.currentTimeMillis;
 
 /**
  * Encapsulates the hinted mutation, its creation time, and the gc grace seconds param for each table involved.
@@ -57,7 +60,7 @@ import static org.apache.cassandra.db.TypeSizes.sizeofUnsignedVInt;
 public final class Hint
 {
     public static final Serializer serializer = new Serializer();
-    static final int maxHintTTL = Integer.getInteger("cassandra.maxHintTTL", Integer.MAX_VALUE);
+    static final int maxHintTTL = CASSANDRA_MAX_HINT_TTL.getInt();
 
     final Mutation mutation;
     final long creationTime;  // time of hint creation (in milliseconds)
@@ -92,7 +95,7 @@ public final class Hint
     /**
      * Applies the contained mutation unless it's expired, filtering out any updates for truncated tables
      */
-    CompletableFuture<?> applyFuture()
+    Future<?> applyFuture()
     {
         if (isLive())
         {
@@ -106,7 +109,7 @@ public final class Hint
                 return filtered.applyFuture();
         }
 
-        return CompletableFuture.completedFuture(null);
+        return ImmediateFuture.success(null);
     }
 
     void apply()
@@ -117,7 +120,8 @@ public final class Hint
         }
         catch (Exception e)
         {
-            throw Throwables.propagate(e.getCause());
+            Throwables.throwIfUnchecked(e.getCause());
+            throw new RuntimeException(e.getCause());
         }
     }
 
@@ -134,13 +138,24 @@ public final class Hint
      */
     public boolean isLive()
     {
-        return isLive(creationTime, System.currentTimeMillis(), ttl());
+        return isLive(creationTime, currentTimeMillis(), ttl());
     }
 
     static boolean isLive(long creationTime, long now, int hintTTL)
     {
-        long expirationTime = creationTime + TimeUnit.SECONDS.toMillis(Math.min(hintTTL, maxHintTTL));
-        return expirationTime > now;
+        return expirationInMillis(creationTime, hintTTL) > now;
+    }
+
+    @VisibleForTesting
+    long expirationInMillis()
+    {
+        int smallestGCGS = Math.min(gcgs, mutation.smallestGCGS());
+        return expirationInMillis(creationTime, smallestGCGS);
+    }
+
+    private static long expirationInMillis(long creationTime, int hintTTL)
+    {
+        return creationTime + TimeUnit.SECONDS.toMillis(Math.min(hintTTL, maxHintTTL));
     }
 
     static final class Serializer implements IVersionedSerializer<Hint>
@@ -156,14 +171,14 @@ public final class Hint
         public void serialize(Hint hint, DataOutputPlus out, int version) throws IOException
         {
             out.writeLong(hint.creationTime);
-            out.writeUnsignedVInt(hint.gcgs);
+            out.writeUnsignedVInt32(hint.gcgs);
             Mutation.serializer.serialize(hint.mutation, out, version);
         }
 
         public Hint deserialize(DataInputPlus in, int version) throws IOException
         {
             long creationTime = in.readLong();
-            int gcgs = (int) in.readUnsignedVInt();
+            int gcgs = in.readUnsignedVInt32();
             return new Hint(Mutation.serializer.deserialize(in, version), creationTime, gcgs);
         }
 
@@ -184,7 +199,7 @@ public final class Hint
         Hint deserializeIfLive(DataInputPlus in, long now, long size, int version) throws IOException
         {
             long creationTime = in.readLong();
-            int gcgs = (int) in.readUnsignedVInt();
+            int gcgs = in.readUnsignedVInt32();
             int bytesRead = sizeof(creationTime) + sizeofUnsignedVInt(gcgs);
 
             if (isLive(creationTime, now, gcgs))
@@ -212,7 +227,7 @@ public final class Hint
             try (DataInputBuffer input = new DataInputBuffer(header))
             {
                 long creationTime = input.readLong();
-                int gcgs = (int) input.readUnsignedVInt();
+                int gcgs = input.readUnsignedVInt32();
 
                 if (!isLive(creationTime, now, gcgs))
                 {

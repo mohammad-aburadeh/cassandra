@@ -21,6 +21,7 @@ package org.apache.cassandra.transport;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 import com.google.common.primitives.Ints;
 import org.slf4j.Logger;
@@ -31,8 +32,8 @@ import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.exceptions.OverloadedException;
-import org.apache.cassandra.metrics.ClientMetrics;
 import org.apache.cassandra.metrics.ClientMessageSizeMetrics;
+import org.apache.cassandra.metrics.ClientMetrics;
 import org.apache.cassandra.net.AbstractMessageHandler;
 import org.apache.cassandra.net.FrameDecoder;
 import org.apache.cassandra.net.FrameDecoder.IntactFrame;
@@ -40,12 +41,13 @@ import org.apache.cassandra.net.FrameEncoder;
 import org.apache.cassandra.net.ResourceLimits;
 import org.apache.cassandra.net.ResourceLimits.Limit;
 import org.apache.cassandra.net.ShareableBytes;
+import org.apache.cassandra.transport.ClientResourceLimits.Overload;
 import org.apache.cassandra.transport.Flusher.FlushItem.Framed;
 import org.apache.cassandra.transport.messages.ErrorMessage;
-import org.apache.cassandra.utils.JVMStabilityInspector;
 import org.apache.cassandra.utils.NoSpamLogger;
+import org.apache.cassandra.utils.concurrent.NonBlockingRateLimiter;
 
-import static org.apache.cassandra.utils.MonotonicClock.approxTime;
+import static org.apache.cassandra.utils.MonotonicClock.Global.approxTime;
 
 /**
  * Implementation of {@link AbstractMessageHandler} for processing CQL messages which comprise a {@link Message} wrapped
@@ -78,7 +80,9 @@ public class CQLMessageHandler<M extends Message> extends AbstractMessageHandler
     private static final NoSpamLogger noSpamLogger = NoSpamLogger.getLogger(logger, 1L, TimeUnit.SECONDS);
 
     public static final int LARGE_MESSAGE_THRESHOLD = FrameEncoder.Payload.MAX_SIZE - 1;
+    public static final TimeUnit RATE_LIMITER_DELAY_UNIT = TimeUnit.NANOSECONDS;
 
+    private final QueueBackpressure queueBackpressure;
     private final Envelope.Decoder envelopeDecoder;
     private final Message.Decoder<M> messageDecoder;
     private final FrameEncoder.PayloadAllocator payloadAllocator;
@@ -86,13 +90,15 @@ public class CQLMessageHandler<M extends Message> extends AbstractMessageHandler
     private final ErrorHandler errorHandler;
     private final boolean throwOnOverload;
     private final ProtocolVersion version;
+    private final NonBlockingRateLimiter requestRateLimiter;
 
     long channelPayloadBytesInFlight;
     private int consecutiveMessageErrors = 0;
 
     interface MessageConsumer<M extends Message>
     {
-        void accept(Channel channel, M message, Dispatcher.FlushItemConverter toFlushItem);
+        void dispatch(Channel channel, M message, Dispatcher.FlushItemConverter toFlushItem, Overload backpressure);
+        boolean hasQueueCapacity();
     }
 
     interface ErrorHandler
@@ -108,6 +114,7 @@ public class CQLMessageHandler<M extends Message> extends AbstractMessageHandler
                       MessageConsumer<M> dispatcher,
                       FrameEncoder.PayloadAllocator payloadAllocator,
                       int queueCapacity,
+                      QueueBackpressure queueBackpressure,
                       ClientResourceLimits.ResourceProvider resources,
                       OnHandlerClosed onClosed,
                       ErrorHandler errorHandler,
@@ -126,9 +133,11 @@ public class CQLMessageHandler<M extends Message> extends AbstractMessageHandler
         this.messageDecoder     = messageDecoder;
         this.payloadAllocator   = payloadAllocator;
         this.dispatcher         = dispatcher;
+        this.queueBackpressure  = queueBackpressure;
         this.errorHandler       = errorHandler;
         this.throwOnOverload    = throwOnOverload;
         this.version            = version;
+        this.requestRateLimiter = resources.requestRateLimiter();
     }
 
     @Override
@@ -139,6 +148,24 @@ public class CQLMessageHandler<M extends Message> extends AbstractMessageHandler
         return super.process(frame);
     }
 
+    /**
+     * Checks limits on bytes in flight and the request rate limiter (if enabled), then takes one of three actions:
+     * 
+     * 1.) If no limits are breached, process the request.
+     * 2.) If a limit is breached, and the connection is configured to throw on overload, throw {@link OverloadedException}.
+     * 3.) If a limit is breached, and the connection is not configurd to throw, process the request, and return false
+     *     to let the {@link FrameDecoder} know it should stop processing frames.
+     *     
+     * If the connection is configured to throw {@link OverloadedException}, requests that breach the rate limit are
+     * not counted against that limit.
+     * 
+     * @return true if the {@link FrameDecoder} should continue to process incoming frames, and false if it should stop
+     *         processing them, effectively applying backpressure to clients
+     * 
+     * @throws ErrorMessage.WrappedException with an {@link OverloadedException} if overload occurs and the 
+     *         connection is configured to throw on overload
+     */
+    @Override
     protected boolean processOneContainedMessage(ShareableBytes bytes, Limit endpointReserve, Limit globalReserve)
     {
         ByteBuffer buf = bytes.get();
@@ -157,41 +184,137 @@ public class CQLMessageHandler<M extends Message> extends AbstractMessageHandler
 
         // max CQL message size defaults to 256mb, so should be safe to downcast
         int messageSize = Ints.checkedCast(header.bodySizeInBytes);
+
+        Overload backpressure = Overload.NONE;
         if (throwOnOverload)
         {
             if (!acquireCapacity(header, endpointReserve, globalReserve))
             {
-                // discard the request and throw an exception
-                ClientMetrics.instance.markRequestDiscarded();
-                logger.trace("Discarded request of size: {}. InflightChannelRequestPayload: {}, " +
-                             "InflightEndpointRequestPayload: {}, InflightOverallRequestPayload: {}, Header: {}",
-                             messageSize,
-                             channelPayloadBytesInFlight,
-                             endpointReserve.using(),
-                             globalReserve.using(),
-                             header);
+                discardAndThrow(endpointReserve, globalReserve, buf, header, messageSize, Overload.BYTES_IN_FLIGHT);
+                return true;
+            }
 
-                handleError(new OverloadedException("Server is in overloaded state. " +
-                                                    "Cannot accept more requests at this point"), header);
+            if (DatabaseDescriptor.getNativeTransportRateLimitingEnabled() && !requestRateLimiter.tryReserve())
+                backpressure = Overload.REQUESTS;
+            else if (!dispatcher.hasQueueCapacity())
+                backpressure = Overload.QUEUE_TIME;
 
-                // Don't stop processing incoming messages, rely on the client to apply
-                // backpressure when it receives OverloadedException
-                // but discard this message as we're responding with the overloaded error
-                incrementReceivedMessageMetrics(messageSize);
-                buf.position(buf.position() + Envelope.Header.LENGTH + messageSize);
+            if (backpressure != Overload.NONE)
+            {
+                // We've already allocated against the bytes-in-flight limits, so release those resources.
+                release(header);
+                discardAndThrow(endpointReserve, globalReserve, buf, header, messageSize, backpressure);
                 return true;
             }
         }
-        else if (!acquireCapacityAndQueueOnFailure(header, endpointReserve, globalReserve))
+        else
         {
-            // set backpressure on the channel, queuing the request until we have capacity
-            ClientMetrics.instance.pauseConnection();
-            return false;
+            long delay = -1;
+
+            if (!acquireCapacityAndQueueOnFailure(header, endpointReserve, globalReserve))
+                backpressure = Overload.BYTES_IN_FLIGHT;
+
+            // Apply rate limiting, if enabled
+            if (DatabaseDescriptor.getNativeTransportRateLimitingEnabled())
+            {
+                // Reserve a permit even if we've already triggered backpressure on bytes in flight.
+                delay = requestRateLimiter.reserveAndGetDelay(RATE_LIMITER_DELAY_UNIT);
+
+                if (backpressure == Overload.NONE && delay > 0)
+                    backpressure = Overload.REQUESTS;
+            }
+
+            // Check queue time, if enabled
+            if (backpressure == Overload.NONE && !dispatcher.hasQueueCapacity())
+            {
+                delay = queueBackpressure.markAndGetDelay(RATE_LIMITER_DELAY_UNIT);
+
+                if (delay > 0)
+                    backpressure = Overload.QUEUE_TIME;
+            }
+
+            if (backpressure != Overload.NONE)
+            {
+                if (processRequestAndUpdateMetrics(bytes, header, messageSize, backpressure))
+                {
+                    if (decoder.isActive())
+                        ClientMetrics.instance.pauseConnection();
+
+                    if (delay > 0)
+                    {
+                        // Schedule a wakeup here if we process successfully. The connection should be closing otherwise.
+                        scheduleConnectionWakeupTask(delay, RATE_LIMITER_DELAY_UNIT);
+                    }
+                }
+
+                // If we triggered backpressure, make sure the caller stops processing frames after the request completes.
+                return false;
+            }
         }
 
+        return processRequestAndUpdateMetrics(bytes, header, messageSize, Overload.NONE);
+    }
+
+    private boolean processRequestAndUpdateMetrics(ShareableBytes bytes, Envelope.Header header, int messageSize, Overload backpressure)
+    {
         channelPayloadBytesInFlight += messageSize;
         incrementReceivedMessageMetrics(messageSize);
-        return processRequest(composeRequest(header, bytes));
+        return processRequest(composeRequest(header, bytes), backpressure);
+    }
+
+    private void discardAndThrow(Limit endpointReserve, Limit globalReserve, 
+                                 ByteBuffer buf, Envelope.Header header, int messageSize,
+                                 Overload overload)
+    {
+        ClientMetrics.instance.markRequestDiscarded();
+        logOverload(endpointReserve, globalReserve, header, messageSize);
+
+        OverloadedException exception = buildOverloadedException(endpointReserve, globalReserve, requestRateLimiter, overload);
+        handleError(exception, header);
+
+        // Don't stop processing incoming messages, as we rely on the client to apply
+        // backpressure when it receives OverloadedException, but discard this message 
+        // as we're responding with the overloaded error.
+        incrementReceivedMessageMetrics(messageSize);
+        buf.position(buf.position() + Envelope.Header.LENGTH + messageSize);
+    }
+
+    public static OverloadedException buildOverloadedException(Limit endpointReserve, Limit globalReserve, NonBlockingRateLimiter requestRateLimiter, Overload overload)
+    {
+        return buildOverloadedException(() -> String.format("Endpoint: %d/%d bytes, Global: %d/%d bytes.", endpointReserve.using(), endpointReserve.limit(),
+                                                            globalReserve.using(), globalReserve.limit()),
+                                        requestRateLimiter,
+                                        overload);
+    }
+    public static OverloadedException buildOverloadedException(Supplier<String> endpointLimits, NonBlockingRateLimiter requestRateLimiter, Overload overload)
+    {
+        switch (overload)
+        {
+            case REQUESTS:
+                return new OverloadedException(String.format("Request breached global limit of %d requests/second. Server is " +
+                                                             "currently in an overloaded state and cannot accept more requests.",
+                                                             requestRateLimiter.getRate()));
+            case BYTES_IN_FLIGHT:
+                return new OverloadedException(String.format("Request breached limit on bytes in flight. (%s)" +
+                                                             "Server is currently in an overloaded state and cannot accept more requests.",
+                                                             endpointLimits.get()));
+            case QUEUE_TIME:
+                return new OverloadedException(String.format("Request has spent over %s time of the maximum timeout %dms in the queue",
+                                                             DatabaseDescriptor.getNativeTransportQueueMaxItemAgeThreshold(),
+                                                             DatabaseDescriptor.getNativeTransportTimeout(TimeUnit.MILLISECONDS)));
+            default:
+                throw new IllegalArgumentException("Overload exception should not have been thrown with " + overload);
+
+        }
+    }
+
+    private void logOverload(Limit endpointReserve, Limit globalReserve, Envelope.Header header, int messageSize)
+    {
+        if (logger.isTraceEnabled())
+            logger.trace("Discarded request of size {} with {} bytes in flight on channel. Using {}/{} bytes of endpoint limit and {}/{} bytes of global limit. Global rate limiter: {} Header: {}",
+                         messageSize, channelPayloadBytesInFlight,
+                         endpointReserve.using(), endpointReserve.limit(), globalReserve.using(), globalReserve.limit(),
+                         requestRateLimiter, header);
     }
 
     private boolean handleProtocolException(ProtocolException exception,
@@ -251,11 +374,17 @@ public class CQLMessageHandler<M extends Message> extends AbstractMessageHandler
 
     protected boolean processRequest(Envelope request)
     {
+        return processRequest(request, Overload.NONE);
+    }
+    
+    protected boolean processRequest(Envelope request, Overload backpressure)
+    {
         M message = null;
         try
         {
             message = messageDecoder.decode(channel, request);
-            dispatcher.accept(channel, message, this::toFlushItem);
+            dispatcher.dispatch(channel, message, this::toFlushItem, backpressure);
+            
             // sucessfully delivered a CQL message to the execution
             // stage, so reset the counter of consecutive errors
             consecutiveMessageErrors = 0;
@@ -293,8 +422,6 @@ public class CQLMessageHandler<M extends Message> extends AbstractMessageHandler
      * to the client.
      * This also releases the capacity acquired for processing as
      * indicated by supplied header.
-     * @param t
-     * @param header
      */
     private void handleErrorAndRelease(Throwable t, Envelope.Header header)
     {
@@ -311,8 +438,6 @@ public class CQLMessageHandler<M extends Message> extends AbstractMessageHandler
      * when an error occurs without any capacity being acquired.
      * Typically, this would be the result of an acquisition failure
      * if the THROW_ON_OVERLOAD option has been specified by the client.
-     * @param t
-     * @param header
      */
     private void handleError(Throwable t, Envelope.Header header)
     {
@@ -328,8 +453,6 @@ public class CQLMessageHandler<M extends Message> extends AbstractMessageHandler
      * when an error occurs without any capacity being acquired.
      * Typically, this would be the result of an acquisition failure
      * if the THROW_ON_OVERLOAD option has been specified by the client.
-     * @param t
-     * @param streamId
      */
     private void handleError(Throwable t, int streamId)
     {
@@ -342,8 +465,6 @@ public class CQLMessageHandler<M extends Message> extends AbstractMessageHandler
      * payload fails. This does not attempt to release any resources, as these errors
      * should only occur before any capacity acquisition is attempted (e.g. on receipt
      * of a corrupt frame, or failure to extract a CQL message from the envelope).
-     *
-     * @param t
      */
     private void handleError(Throwable t)
     {
@@ -405,40 +526,93 @@ public class CQLMessageHandler<M extends Message> extends AbstractMessageHandler
             // max CQL message size defaults to 256mb, so should be safe to downcast
             int messageSize = Ints.checkedCast(header.bodySizeInBytes);
             receivedBytes += buf.remaining();
-
+            
             LargeMessage largeMessage = new LargeMessage(header);
-            if (!acquireCapacity(header, endpointReserve, globalReserve))
-            {
-                // In the case of large messages, never stop processing incoming frames
-                // as this will halt the client meaning no further frames will be sent,
-                // leading to starvation.
-                // If the throwOnOverload option is set, don't process the message once
-                // read, return an error response to notify the client that resource
-                // limits have been exceeded. If the option isn't set, the only thing we
-                // can do is to consume the subsequent frames and process the message.
-                // Large and small messages are never interleaved for a single client, so
-                // we know that this client will finish sending the large message before
-                // anything else. Other clients sending small messages concurrently will
-                // be backpressured by the global resource limits. The server is still
-                // vulnerable to overload by multiple clients sending large messages
-                // concurrently.
-                if (throwOnOverload)
-                {
-                    // discard the request and throw an exception
-                    ClientMetrics.instance.markRequestDiscarded();
-                    logger.trace("Discarded request of size: {}. InflightChannelRequestPayload: {}, " +
-                                 "InflightEndpointRequestPayload: {}, InflightOverallRequestPayload: {}, Header: {}",
-                                 messageSize,
-                                 channelPayloadBytesInFlight,
-                                 endpointReserve.using(),
-                                 globalReserve.using(),
-                                 header);
 
-                    // mark as overloaded so that discard the message
-                    // after consuming any subsequent frames
-                    largeMessage.markOverloaded();
+            if (throwOnOverload)
+            {
+                if (!acquireCapacity(header, endpointReserve, globalReserve))
+                {
+                    // In the case of large messages, never stop processing incoming frames
+                    // as this will halt the client meaning no further frames will be sent,
+                    // leading to starvation.
+                    // If the throwOnOverload option is set, don't process the message once
+                    // read, return an error response to notify the client that resource
+                    // limits have been exceeded. If the option isn't set, the only thing we
+                    // can do is to consume the subsequent frames and process the message.
+                    // Large and small messages are never interleaved for a single client, so
+                    // we know that this client will finish sending the large message before
+                    // anything else. Other clients sending small messages concurrently will
+                    // be backpressured by the global resource limits. The server is still
+                    // vulnerable to overload by multiple clients sending large messages
+                    // concurrently.
+
+                    // Mark as overloaded so that discard the message after consuming any subsequent frames.
+                    ClientMetrics.instance.markRequestDiscarded();
+                    logOverload(endpointReserve, globalReserve, header, messageSize);
+                    largeMessage.markOverloaded(Overload.BYTES_IN_FLIGHT);
+                }
+                else
+                {
+                    Overload backpressure = Overload.NONE;
+                    if (DatabaseDescriptor.getNativeTransportRateLimitingEnabled() && !requestRateLimiter.tryReserve())
+                        backpressure = Overload.REQUESTS;
+                    else if (!dispatcher.hasQueueCapacity())
+                        backpressure = Overload.QUEUE_TIME;
+
+                    if (backpressure != Overload.NONE)
+                    {
+                        ClientMetrics.instance.markRequestDiscarded();
+                        logOverload(endpointReserve, globalReserve, header, messageSize);
+
+                        // Mark as overloaded so that we discard the message after consuming any subsequent frames.
+                        // (i.e. Request resources we may already have acquired above will be released.)
+                        largeMessage.markOverloaded(backpressure);
+
+                        this.largeMessage = largeMessage;
+                        largeMessage.supply(frame);
+                        return true;
+                    }
                 }
             }
+            else
+            {
+                if (acquireCapacity(header, endpointReserve, globalReserve))
+                {
+                    long delay = -1;
+                    Overload backpressure = Overload.NONE;
+
+                    if (DatabaseDescriptor.getNativeTransportRateLimitingEnabled())
+                    {
+                        delay = requestRateLimiter.reserveAndGetDelay(RATE_LIMITER_DELAY_UNIT);
+
+                        if (delay > 0)
+                            backpressure = Overload.REQUESTS;
+                    }
+
+                    if (backpressure == Overload.NONE && !dispatcher.hasQueueCapacity())
+                    {
+                        delay = queueBackpressure.markAndGetDelay(RATE_LIMITER_DELAY_UNIT);
+
+                        if (delay > 0)
+                            backpressure = Overload.QUEUE_TIME;
+                    }
+
+                    if (delay > 0)
+                    {
+                        this.largeMessage = largeMessage;
+                        largeMessage.markBackpressure(backpressure);
+                        largeMessage.supply(frame);
+
+                        if (decoder.isActive())
+                            ClientMetrics.instance.pauseConnection();
+
+                        scheduleConnectionWakeupTask(delay, RATE_LIMITER_DELAY_UNIT);
+                        return false;
+                    }
+                }
+            }
+
             this.largeMessage = largeMessage;
             largeMessage.supply(frame);
             return true;
@@ -452,6 +626,31 @@ public class CQLMessageHandler<M extends Message> extends AbstractMessageHandler
     protected String id()
     {
         return channel.id().asShortText();
+    }
+
+    private void scheduleConnectionWakeupTask(long waitLength, TimeUnit unit)
+    {
+        channel.eventLoop().schedule(() ->
+                                     {
+                                         try
+                                         {
+                                             // We might have already reactivated via another wake task.
+                                             if (!decoder.isActive())
+                                             {
+                                                 decoder.reactivate();
+
+                                                 // Only update the relevant metric if we've actually activated.
+                                                 if (decoder.isActive())
+                                                     ClientMetrics.instance.unpauseConnection();
+                                             }
+                                         }
+                                         catch (Throwable t)
+                                         {
+                                             fatalExceptionCaught(t);
+                                         }
+                                     },
+                                     waitLength,
+                                     unit);
     }
 
     @SuppressWarnings("BooleanMethodIsAlwaysInverted")
@@ -515,7 +714,8 @@ public class CQLMessageHandler<M extends Message> extends AbstractMessageHandler
     {
         private static final long EXPIRES_AT = Long.MAX_VALUE;
 
-        private boolean overloaded = false;
+        private Overload overload = Overload.NONE;
+        private Overload backpressure = Overload.NONE;
 
         private LargeMessage(Envelope.Header header)
         {
@@ -541,19 +741,22 @@ public class CQLMessageHandler<M extends Message> extends AbstractMessageHandler
          * so we must ensure that subsequent frames are consumed from the channel. At that
          * point an error response is returned to the client, rather than processing the message.
          */
-        private void markOverloaded()
+        private void markOverloaded(Overload overload)
         {
-            overloaded = true;
+            this.overload = overload;
+        }
+
+        private void markBackpressure(Overload backpressure)
+        {
+            this.backpressure = backpressure;
         }
 
         protected void onComplete()
         {
-            if (overloaded)
-                handleErrorAndRelease(new OverloadedException("Server is in overloaded state. " +
-                                                              "Cannot accept more requests at this point"), header);
+            if (overload != Overload.NONE)
+                handleErrorAndRelease(buildOverloadedException(endpointReserveCapacity, globalReserveCapacity, requestRateLimiter, overload), header);
             else if (!isCorrupt)
-                processRequest(assembleFrame());
-
+                processRequest(assembleFrame(), backpressure);
         }
 
         protected void abort()

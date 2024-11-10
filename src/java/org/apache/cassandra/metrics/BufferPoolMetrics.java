@@ -25,6 +25,7 @@ import static org.apache.cassandra.metrics.CassandraMetricsRegistry.Metrics;
 
 public class BufferPoolMetrics
 {
+    public static final String TYPE_NAME = "BufferPool";
     /** Total number of hits */
     public final Meter hits;
 
@@ -49,7 +50,7 @@ public class BufferPoolMetrics
 
     public BufferPoolMetrics(String scope, BufferPool bufferPool)
     {
-        MetricNameFactory factory = new DefaultNameFactory("BufferPool", scope);
+        MetricNameFactory factory = new DefaultNameFactory(TYPE_NAME, scope);
 
         hits = Metrics.meter(factory.createMetricName("Hits"));
 
@@ -64,13 +65,4 @@ public class BufferPoolMetrics
         size = Metrics.register(factory.createMetricName("Size"), bufferPool::sizeInBytes);
     }
 
-    /**
-     * used to register alias for 3.0/3.11 compatibility
-     */
-    public void register3xAlias()
-    {
-        MetricNameFactory legacyFactory = new DefaultNameFactory("BufferPool");
-        Metrics.registerMBean(misses, legacyFactory.createMetricName("Misses").getMBeanName());
-        Metrics.registerMBean(size, legacyFactory.createMetricName("Size").getMBeanName());
-    }
 }

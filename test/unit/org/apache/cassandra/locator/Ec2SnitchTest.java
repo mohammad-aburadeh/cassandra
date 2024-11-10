@@ -19,27 +19,23 @@
 package org.apache.cassandra.locator;
 
 import java.util.Collections;
-import java.util.EnumMap;
 import java.util.HashSet;
-import java.util.Map;
-import java.util.Properties;
 import java.util.Set;
 
 import org.junit.AfterClass;
+import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
+import org.apache.cassandra.ServerTestUtils;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.Keyspace;
-import org.apache.cassandra.db.commitlog.CommitLog;
-import org.apache.cassandra.gms.ApplicationState;
-import org.apache.cassandra.gms.Gossiper;
-import org.apache.cassandra.gms.VersionedValue;
+import org.apache.cassandra.dht.Token;
+import org.apache.cassandra.distributed.test.log.ClusterMetadataTestHelper;
 import org.apache.cassandra.service.StorageService;
+import org.apache.cassandra.tcm.ClusterMetadata;
 import org.mockito.stubbing.Answer;
 
-import static org.apache.cassandra.ServerTestUtils.cleanup;
-import static org.apache.cassandra.ServerTestUtils.mkdirs;
+import static org.apache.cassandra.config.CassandraRelevantProperties.GOSSIP_DISABLE_THREAD_VALIDATION;
 import static org.apache.cassandra.locator.Ec2MultiRegionSnitch.PRIVATE_IP_QUERY;
 import static org.apache.cassandra.locator.Ec2MultiRegionSnitch.PUBLIC_IP_QUERY;
 import static org.apache.cassandra.locator.Ec2Snitch.EC2_NAMING_LEGACY;
@@ -47,7 +43,10 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 public class Ec2SnitchTest
@@ -63,14 +62,9 @@ public class Ec2SnitchTest
     @BeforeClass
     public static void setup() throws Exception
     {
-        System.setProperty(Gossiper.Props.DISABLE_THREAD_VALIDATION, "true");
+        GOSSIP_DISABLE_THREAD_VALIDATION.setBoolean(true);
         DatabaseDescriptor.daemonInitialization();
-        CommitLog.instance.start();
-        CommitLog.instance.segmentManager.awaitManagementTasksCompletion();
-        mkdirs();
-        cleanup();
-        Keyspace.setInitialized();
-        StorageService.instance.initServer(0);
+        ClusterMetadataTestHelper.setInstanceForTest();
     }
 
 
@@ -80,55 +74,65 @@ public class Ec2SnitchTest
         StorageService.instance.stopClient();
     }
 
+    @Before
+    public void resetCMS()
+    {
+        ServerTestUtils.resetCMS();
+    }
+
     @Test
     public void testLegacyRac() throws Exception
     {
         Ec2MetadataServiceConnector connectorMock = mock(Ec2MetadataServiceConnector.class);
-        when(connectorMock.apiCall(anyString())).thenReturn("us-east-1d");
-        Ec2Snitch snitch = new Ec2Snitch(legacySnitchProps, connectorMock);
+        doReturn("us-east-1d").when(connectorMock).apiCall(anyString());
+        doReturn(legacySnitchProps).when(connectorMock).getProperties();
+        Ec2Snitch snitch = new Ec2Snitch(connectorMock);
         testLegacyRacInternal(snitch);
     }
 
     @Test
     public void testMultiregionLegacyRac() throws Exception
     {
-        Ec2MetadataServiceConnector multiRegionConnectorMock = mock(Ec2MetadataServiceConnector.class);
-        when(multiRegionConnectorMock.apiCall(anyString())).then((Answer<String>) invocation -> {
+        Ec2MetadataServiceConnector spy = spy(Ec2MetadataServiceConnector.create(legacySnitchProps));
+        doReturn(legacySnitchProps).when(spy).getProperties();
+        doAnswer((Answer<String>) invocation -> {
             String query = invocation.getArgument(0);
             return (PUBLIC_IP_QUERY.equals(query) || PRIVATE_IP_QUERY.equals(query)) ? "127.0.0.1" : "us-east-1d";
-        });
+        }).when(spy).apiCall(anyString());
 
-        Ec2Snitch snitch = new Ec2MultiRegionSnitch(legacySnitchProps, multiRegionConnectorMock);
+        Ec2Snitch snitch = new Ec2MultiRegionSnitch(spy);
         testLegacyRacInternal(snitch);
     }
 
     @Test
     public void testLegacyNewRegions() throws Exception
     {
-        Ec2MetadataServiceConnector connectorMock = mock(Ec2MetadataServiceConnector.class);
-        when(connectorMock.apiCall(anyString())).thenReturn("us-east-2d");
-        testLegacyNewRegionsInternal(new Ec2Snitch(legacySnitchProps, connectorMock));
+        Ec2MetadataServiceConnector spy = spy(Ec2MetadataServiceConnector.create(legacySnitchProps));
+        doReturn(legacySnitchProps).when(spy).getProperties();
+        doReturn("us-east-2d").when(spy).apiCall(anyString());
+        testLegacyNewRegionsInternal(new Ec2Snitch(spy));
     }
 
     @Test
     public void testLegacyMultiRegionNewRegions() throws Exception
     {
-        Ec2MetadataServiceConnector multiRegionConnectorMock = mock(Ec2MetadataServiceConnector.class);
-        when(multiRegionConnectorMock.apiCall(anyString())).then((Answer<String>) invocation -> {
+        Ec2MetadataServiceConnector spy = spy(Ec2MetadataServiceConnector.create(legacySnitchProps));
+        doReturn(legacySnitchProps).when(spy).getProperties();
+        doAnswer((Answer<String>) invocation -> {
             String query = invocation.getArgument(0);
             return (PUBLIC_IP_QUERY.equals(query) || PRIVATE_IP_QUERY.equals(query)) ? "127.0.0.1" : "us-east-2d";
-        });
+        }).when(spy).apiCall(anyString());
 
-        testLegacyNewRegionsInternal(new Ec2MultiRegionSnitch(legacySnitchProps, multiRegionConnectorMock));
+        testLegacyNewRegionsInternal(new Ec2MultiRegionSnitch(spy));
     }
-
 
     @Test
     public void testFullNamingScheme() throws Exception
     {
         Ec2MetadataServiceConnector connectorMock = mock(Ec2MetadataServiceConnector.class);
         when(connectorMock.apiCall(anyString())).thenReturn("us-east-2d");
-        Ec2Snitch snitch = new Ec2Snitch(new SnitchProperties(new Properties()), connectorMock);
+        when(connectorMock.getProperties()).thenReturn(new SnitchProperties());
+        Ec2Snitch snitch = new Ec2Snitch(connectorMock);
 
         InetAddressAndPort local = InetAddressAndPort.getByName("127.0.0.1");
 
@@ -136,6 +140,7 @@ public class Ec2SnitchTest
         assertEquals("us-east-2d", snitch.getRack(local));
 
         Ec2MetadataServiceConnector multiRegionConnectorMock = mock(Ec2MetadataServiceConnector.class);
+        when(connectorMock.getProperties()).thenReturn(new SnitchProperties());
         when(multiRegionConnectorMock.apiCall(anyString())).then((Answer<String>) invocation -> {
             String query = invocation.getArgument(0);
             return (PUBLIC_IP_QUERY.equals(query) || PRIVATE_IP_QUERY.equals(query)) ? "127.0.0.1" : "us-east-2d";
@@ -249,11 +254,8 @@ public class Ec2SnitchTest
         InetAddressAndPort local = InetAddressAndPort.getByName("127.0.0.1");
         InetAddressAndPort nonlocal = InetAddressAndPort.getByName("127.0.0.7");
 
-        Gossiper.instance.addSavedEndpoint(nonlocal);
-        Map<ApplicationState, VersionedValue> stateMap = new EnumMap<>(ApplicationState.class);
-        stateMap.put(ApplicationState.DC, StorageService.instance.valueFactory.datacenter("us-west"));
-        stateMap.put(ApplicationState.RACK, StorageService.instance.valueFactory.datacenter("1a"));
-        Gossiper.instance.getEndpointStateForEndpoint(nonlocal).addApplicationStates(stateMap);
+        Token t1 = ClusterMetadata.current().partitioner.getRandomToken();
+        ClusterMetadataTestHelper.addEndpoint(nonlocal, t1, "us-west", "1a");
 
         assertEquals("us-west", snitch.getDatacenter(nonlocal));
         assertEquals("1a", snitch.getRack(nonlocal));

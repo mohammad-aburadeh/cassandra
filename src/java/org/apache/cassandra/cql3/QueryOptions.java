@@ -24,6 +24,9 @@ import com.google.common.collect.ImmutableList;
 
 import io.netty.buffer.ByteBuf;
 
+import org.apache.cassandra.config.DataStorageSpec;
+import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.cql3.terms.Term;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.marshal.UTF8Type;
@@ -34,6 +37,7 @@ import org.apache.cassandra.transport.CBCodec;
 import org.apache.cassandra.transport.CBUtil;
 import org.apache.cassandra.transport.ProtocolException;
 import org.apache.cassandra.transport.ProtocolVersion;
+import org.apache.cassandra.utils.CassandraUInt;
 import org.apache.cassandra.utils.Pair;
 import org.apache.commons.lang3.builder.ToStringBuilder;
 import org.apache.commons.lang3.builder.ToStringStyle;
@@ -51,12 +55,19 @@ public abstract class QueryOptions
 
     public static final CBCodec<QueryOptions> codec = new Codec();
 
+    private static final long UNSET_NOWINSEC = Long.MIN_VALUE;
+
     // A cache of bind values parsed as JSON, see getJsonColumnValue for details.
     private List<Map<ColumnIdentifier, Term>> jsonValuesCache;
 
     public static QueryOptions forInternalCalls(ConsistencyLevel consistency, List<ByteBuffer> values)
     {
         return new DefaultQueryOptions(consistency, values, false, SpecificOptions.DEFAULT, ProtocolVersion.V3);
+    }
+
+    public static QueryOptions forInternalCallsWithNowInSec(long nowInSec, ConsistencyLevel consistency, List<ByteBuffer> values)
+    {
+        return new DefaultQueryOptions(consistency, values, false, SpecificOptions.DEFAULT.withNowInSec(nowInSec), ProtocolVersion.CURRENT);
     }
 
     public static QueryOptions forInternalCalls(List<ByteBuffer> values)
@@ -78,7 +89,7 @@ public abstract class QueryOptions
                                       ProtocolVersion version,
                                       String keyspace)
     {
-        return create(consistency, values, skipMetadata, pageSize, pagingState, serialConsistency, version, keyspace, Long.MIN_VALUE, Integer.MIN_VALUE);
+        return create(consistency, values, skipMetadata, pageSize, pagingState, serialConsistency, version, keyspace, Long.MIN_VALUE, UNSET_NOWINSEC);
     }
 
     public static QueryOptions create(ConsistencyLevel consistency,
@@ -90,7 +101,7 @@ public abstract class QueryOptions
                                       ProtocolVersion version,
                                       String keyspace,
                                       long timestamp,
-                                      int nowInSeconds)
+                                      long nowInSeconds)
     {
         return new DefaultQueryOptions(consistency,
                                        values,
@@ -102,6 +113,16 @@ public abstract class QueryOptions
     public static QueryOptions addColumnSpecifications(QueryOptions options, List<ColumnSpecification> columnSpecs)
     {
         return new OptionsWithColumnSpecifications(options, columnSpecs);
+    }
+
+    public static QueryOptions withConsistencyLevel(QueryOptions options, ConsistencyLevel consistencyLevel)
+    {
+        return new OptionsWithConsistencyLevel(options, consistencyLevel);
+    }
+
+    public static QueryOptions withPageSize(QueryOptions options, int pageSize)
+    {
+        return new OptionsWithPageSize(options, pageSize);
     }
 
     public abstract ConsistencyLevel getConsistency();
@@ -199,14 +220,20 @@ public abstract class QueryOptions
         return tstamp != Long.MIN_VALUE ? tstamp : state.getTimestamp();
     }
 
-    public int getNowInSeconds(QueryState state)
+    public long getNowInSeconds(QueryState state)
     {
-        int nowInSeconds = getSpecificOptions().nowInSeconds;
-        return nowInSeconds != Integer.MIN_VALUE ? nowInSeconds : state.getNowInSeconds();
+        long nowInSeconds = getSpecificOptions().nowInSeconds;
+        return nowInSeconds != UNSET_NOWINSEC ? nowInSeconds : state.getNowInSeconds();
     }
 
     /** The keyspace that this query is bound to, or null if not relevant. */
     public String getKeyspace() { return getSpecificOptions().keyspace; }
+
+    public long getNowInSec(long ifNotSet)
+    {
+        long nowInSec = getSpecificOptions().nowInSeconds;
+        return nowInSec != UNSET_NOWINSEC ? nowInSec : ifNotSet;
+    }
 
     /**
      * The protocol version for the query.
@@ -216,9 +243,96 @@ public abstract class QueryOptions
     // Mainly for the sake of BatchQueryOptions
     abstract SpecificOptions getSpecificOptions();
 
+    abstract ReadThresholds getReadThresholds();
+
+    public boolean isReadThresholdsEnabled()
+    {
+        return getReadThresholds().isEnabled();
+    }
+
+    public long getCoordinatorReadSizeWarnThresholdBytes()
+    {
+        return getReadThresholds().getCoordinatorReadSizeWarnThresholdBytes();
+    }
+
+    public long getCoordinatorReadSizeAbortThresholdBytes()
+    {
+        return getReadThresholds().getCoordinatorReadSizeFailThresholdBytes();
+    }
+
     public QueryOptions prepare(List<ColumnSpecification> specs)
     {
         return this;
+    }
+
+    interface ReadThresholds
+    {
+        boolean isEnabled();
+
+        long getCoordinatorReadSizeWarnThresholdBytes();
+
+        long getCoordinatorReadSizeFailThresholdBytes();
+
+        static ReadThresholds create()
+        {
+            // if daemon initialization hasn't happened yet (very common in tests) then ignore
+            if (!DatabaseDescriptor.isDaemonInitialized() || !DatabaseDescriptor.getReadThresholdsEnabled())
+                return DisabledReadThresholds.INSTANCE;
+            return new DefaultReadThresholds(DatabaseDescriptor.getCoordinatorReadSizeWarnThreshold(), DatabaseDescriptor.getCoordinatorReadSizeFailThreshold());
+        }
+    }
+
+    private enum DisabledReadThresholds implements ReadThresholds
+    {
+        INSTANCE;
+
+        @Override
+        public boolean isEnabled()
+        {
+            return false;
+        }
+
+        @Override
+        public long getCoordinatorReadSizeWarnThresholdBytes()
+        {
+            return -1;
+        }
+
+        @Override
+        public long getCoordinatorReadSizeFailThresholdBytes()
+        {
+            return -1;
+        }
+    }
+
+    private static class DefaultReadThresholds implements ReadThresholds
+    {
+        private final long warnThresholdBytes;
+        private final long abortThresholdBytes;
+
+        public DefaultReadThresholds(DataStorageSpec.LongBytesBound warnThreshold, DataStorageSpec.LongBytesBound abortThreshold)
+        {
+            this.warnThresholdBytes = warnThreshold == null ? -1 : warnThreshold.toBytes();
+            this.abortThresholdBytes = abortThreshold == null ? -1 : abortThreshold.toBytes();
+        }
+
+        @Override
+        public boolean isEnabled()
+        {
+            return true;
+        }
+
+        @Override
+        public long getCoordinatorReadSizeWarnThresholdBytes()
+        {
+            return warnThresholdBytes;
+        }
+
+        @Override
+        public long getCoordinatorReadSizeFailThresholdBytes()
+        {
+            return abortThresholdBytes;
+        }
     }
 
     static class DefaultQueryOptions extends QueryOptions
@@ -230,6 +344,7 @@ public abstract class QueryOptions
         private final SpecificOptions options;
 
         private final transient ProtocolVersion protocolVersion;
+        private final transient ReadThresholds readThresholds = ReadThresholds.create();
 
         DefaultQueryOptions(ConsistencyLevel consistency, List<ByteBuffer> values, boolean skipMetadata, SpecificOptions options, ProtocolVersion protocolVersion)
         {
@@ -263,6 +378,12 @@ public abstract class QueryOptions
         SpecificOptions getSpecificOptions()
         {
             return options;
+        }
+
+        @Override
+        ReadThresholds getReadThresholds()
+        {
+            return readThresholds;
         }
     }
 
@@ -301,10 +422,50 @@ public abstract class QueryOptions
         }
 
         @Override
+        ReadThresholds getReadThresholds()
+        {
+            return wrapped.getReadThresholds();
+        }
+
+        @Override
         public QueryOptions prepare(List<ColumnSpecification> specs)
         {
             wrapped.prepare(specs);
             return this;
+        }
+    }
+
+    static class OptionsWithConsistencyLevel extends QueryOptionsWrapper
+    {
+        private final ConsistencyLevel consistencyLevel;
+
+        OptionsWithConsistencyLevel(QueryOptions wrapped, ConsistencyLevel consistencyLevel)
+        {
+            super(wrapped);
+            this.consistencyLevel = consistencyLevel;
+        }
+
+        @Override
+        public ConsistencyLevel getConsistency()
+        {
+            return consistencyLevel;
+        }
+    }
+
+    static class OptionsWithPageSize extends QueryOptionsWrapper
+    {
+        private final int pageSize;
+
+        OptionsWithPageSize(QueryOptions wrapped, int pageSize)
+        {
+            super(wrapped);
+            this.pageSize = pageSize;
+        }
+
+        @Override
+        public int getPageSize()
+        {
+            return pageSize;
         }
     }
 
@@ -377,21 +538,21 @@ public abstract class QueryOptions
     // Options that are likely to not be present in most queries
     static class SpecificOptions
     {
-        private static final SpecificOptions DEFAULT = new SpecificOptions(-1, null, null, Long.MIN_VALUE, null, Integer.MIN_VALUE);
+        private static final SpecificOptions DEFAULT = new SpecificOptions(-1, null, null, Long.MIN_VALUE, null, UNSET_NOWINSEC);
 
         private final int pageSize;
         private final PagingState state;
         private final ConsistencyLevel serialConsistency;
         private final long timestamp;
         private final String keyspace;
-        private final int nowInSeconds;
+        private final long nowInSeconds;
 
         private SpecificOptions(int pageSize,
                                 PagingState state,
                                 ConsistencyLevel serialConsistency,
                                 long timestamp,
                                 String keyspace,
-                                int nowInSeconds)
+                                long nowInSeconds)
         {
             this.pageSize = pageSize;
             this.state = state;
@@ -399,6 +560,11 @@ public abstract class QueryOptions
             this.timestamp = timestamp;
             this.keyspace = keyspace;
             this.nowInSeconds = nowInSeconds;
+        }
+
+        public SpecificOptions withNowInSec(long nowInSec)
+        {
+            return new SpecificOptions(pageSize, state, serialConsistency, timestamp, keyspace, nowInSec);
         }
     }
 
@@ -481,7 +647,8 @@ public abstract class QueryOptions
                     timestamp = ts;
                 }
                 String keyspace = flags.contains(Flag.KEYSPACE) ? CBUtil.readString(body) : null;
-                int nowInSeconds = flags.contains(Flag.NOW_IN_SECONDS) ? body.readInt() : Integer.MIN_VALUE;
+                long nowInSeconds = flags.contains(Flag.NOW_IN_SECONDS) ? CassandraUInt.toLong(body.readInt())
+                                                                        : UNSET_NOWINSEC;
                 options = new SpecificOptions(pageSize, pagingState, serialConsistency, timestamp, keyspace, nowInSeconds);
             }
 
@@ -512,7 +679,7 @@ public abstract class QueryOptions
             if (flags.contains(Flag.KEYSPACE))
                 CBUtil.writeAsciiString(options.getSpecificOptions().keyspace, dest);
             if (flags.contains(Flag.NOW_IN_SECONDS))
-                dest.writeInt(options.getSpecificOptions().nowInSeconds);
+                dest.writeInt(CassandraUInt.fromLong(options.getSpecificOptions().nowInSeconds));
 
             // Note that we don't really have to bother with NAMES_FOR_VALUES server side,
             // and in fact we never really encode QueryOptions, only decode them, so we
@@ -566,7 +733,7 @@ public abstract class QueryOptions
             {
                 if (options.getSpecificOptions().keyspace != null)
                     flags.add(Flag.KEYSPACE);
-                if (options.getSpecificOptions().nowInSeconds != Integer.MIN_VALUE)
+                if (options.getSpecificOptions().nowInSeconds != UNSET_NOWINSEC)
                     flags.add(Flag.NOW_IN_SECONDS);
             }
 

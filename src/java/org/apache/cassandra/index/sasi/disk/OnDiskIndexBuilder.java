@@ -17,7 +17,6 @@
  */
 package org.apache.cassandra.index.sasi.disk;
 
-import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.*;
@@ -44,6 +43,8 @@ import com.google.common.annotations.VisibleForTesting;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import static org.apache.cassandra.utils.LocalizeString.toUpperCaseLocalized;
+
 public class OnDiskIndexBuilder
 {
     private static final Logger logger = LoggerFactory.getLogger(OnDiskIndexBuilder.class);
@@ -63,7 +64,7 @@ public class OnDiskIndexBuilder
 
         public static Mode mode(String mode)
         {
-            return Mode.valueOf(mode.toUpperCase());
+            return Mode.valueOf(toUpperCaseLocalized(mode));
         }
 
         public boolean supports(Op op)
@@ -247,15 +248,7 @@ public class OnDiskIndexBuilder
         // no terms means there is nothing to build
         if (terms.isEmpty())
         {
-            try
-            {
-                file.createNewFile();
-            }
-            catch (IOException e)
-            {
-                throw new FSWriteError(e, file);
-            }
-
+            file.createFileIfNotExists();
             return false;
         }
 
@@ -270,7 +263,6 @@ public class OnDiskIndexBuilder
         return true;
     }
 
-    @SuppressWarnings("resource")
     protected void finish(Descriptor descriptor, Pair<ByteBuffer, ByteBuffer> range, File file, TermIterator terms)
     {
         SequentialWriter out = null;

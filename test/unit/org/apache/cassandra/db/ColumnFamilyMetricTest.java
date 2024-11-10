@@ -60,7 +60,7 @@ public class ColumnFamilyMetricTest
         // late - after the whole system is already running, and some static fields may remain uninitialized
         // OTOH, late initialization of them may have creepy effects (for example NPEs in static initializers)
         // disclaimer: this is not a proper way to fix that
-        StorageService.instance.forceKeyspaceFlush(SchemaConstants.SYSTEM_KEYSPACE_NAME);
+        StorageService.instance.forceKeyspaceFlush(SchemaConstants.SYSTEM_KEYSPACE_NAME, ColumnFamilyStore.FlushReason.UNIT_TESTS);
     }
 
     @Test
@@ -79,7 +79,7 @@ public class ColumnFamilyMetricTest
         {
             applyMutation(cfs.metadata(), String.valueOf(j), ByteBufferUtil.EMPTY_BYTE_BUFFER, FBUtilities.timestampMicros());
         }
-        cfs.forceBlockingFlush();
+        Util.flush(cfs);
         Collection<SSTableReader> sstables = cfs.getLiveSSTables();
         long size = 0;
         for (SSTableReader reader : sstables)
@@ -161,7 +161,7 @@ public class ColumnFamilyMetricTest
             applyMutation(store.metadata(), "1", bytes(1), FBUtilities.timestampMicros());
 
             // Flushing first SSTable
-            store.forceBlockingFlush();
+            Util.flush(store);
 
             long[] estimatedColumnCountHistogram = store.metric.estimatedColumnCountHistogram.getValue();
             assertNumberOfNonZeroValue(estimatedColumnCountHistogram, 1);
@@ -174,7 +174,7 @@ public class ColumnFamilyMetricTest
             applyMutation(store.metadata(), "2", bytes(2), FBUtilities.timestampMicros());
 
             // Flushing second SSTable
-            store.forceBlockingFlush();
+            Util.flush(store);
 
             estimatedColumnCountHistogram = store.metric.estimatedColumnCountHistogram.getValue();
             assertNumberOfNonZeroValue(estimatedColumnCountHistogram, 1);

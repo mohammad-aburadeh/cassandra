@@ -23,6 +23,7 @@ import java.util.Collection;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
+import org.apache.cassandra.Util;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
@@ -33,14 +34,19 @@ import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.io.sstable.ISSTableScanner;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 
+import static org.apache.cassandra.config.CassandraRelevantProperties.NEVER_PURGE_TOMBSTONES;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 public class NeverPurgeTest extends CQLTester
 {
     @BeforeClass
-    public static void setUpClass() // method name must match the @BeforeClass annotated method in CQLTester
+    // note that the name of this method is important - it shadows the same method CQLTester to
+    // avoid statically initializing CompactionController before setting this prop
+    public static void setUpClass()
     {
-        System.setProperty("cassandra.never_purge_tombstones", "true");
+        NEVER_PURGE_TOMBSTONES.setBoolean(true);
+        assertTrue(CompactionController.NEVER_PURGE_TOMBSTONES_PROPERTY_VALUE);
         CQLTester.setUpClass();
     }
 
@@ -74,13 +80,13 @@ public class NeverPurgeTest extends CQLTester
             {
                 execute("INSERT INTO %s (a, b, c) VALUES (" + j + ", 2, '3')");
             }
-            cfs.forceBlockingFlush();
+            Util.flush(cfs);
         }
 
         execute("UPDATE %s SET c = null WHERE a=1 AND b=2");
         execute("DELETE FROM %s WHERE a=2 AND b=2");
         execute("DELETE FROM %s WHERE a=3");
-        cfs.forceBlockingFlush();
+        Util.flush(cfs);
         cfs.enableAutoCompaction();
         while (cfs.getLiveSSTables().size() > 1 || !cfs.getTracker().getCompacting().isEmpty())
             Thread.sleep(100);
@@ -94,7 +100,7 @@ public class NeverPurgeTest extends CQLTester
         execute("INSERT INTO %s (a, b, c) VALUES (1, 2, '3')");
         execute(deletionStatement);
         Thread.sleep(1000);
-        cfs.forceBlockingFlush();
+        Util.flush(cfs);
         cfs.forceMajorCompaction();
         verifyContainsTombstones(cfs.getLiveSSTables(), 1);
     }

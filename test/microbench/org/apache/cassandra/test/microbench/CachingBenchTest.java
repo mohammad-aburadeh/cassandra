@@ -29,15 +29,14 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Predicate;
 
 import com.google.common.collect.Iterables;
+import org.junit.Assert;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
-import org.junit.Assert;
-
+import org.apache.cassandra.cache.ChunkCache;
 import org.apache.cassandra.config.Config.CommitLogSync;
 import org.apache.cassandra.config.Config.DiskAccessMode;
-import org.apache.cassandra.cache.ChunkCache;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.cql3.UntypedResultSet;
@@ -51,6 +50,8 @@ import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.utils.FBUtilities;
 
+import static org.apache.cassandra.utils.Clock.Global.currentTimeMillis;
+import static org.apache.cassandra.utils.Clock.Global.nanoTime;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class CachingBenchTest extends CQLTester
@@ -186,9 +187,9 @@ public class CachingBenchTest extends CQLTester
             if (ii % (FLUSH_FREQ * 10) == 0)
             {
                 System.out.println("C");
-                long startTime = System.nanoTime();
+                long startTime = nanoTime();
                 getCurrentColumnFamilyStore().enableAutoCompaction(!CONCURRENT_COMPACTIONS);
-                long endTime = System.nanoTime();
+                long endTime = nanoTime();
                 compactionTimeNanos += endTime - startTime;
                 getCurrentColumnFamilyStore().disableAutoCompaction();
             }
@@ -199,14 +200,14 @@ public class CachingBenchTest extends CQLTester
     {
         id.set(0);
         compactionTimeNanos = 0;
-        ChunkCache.instance.enable(cacheEnabled);
+        DatabaseDescriptor.setFileCacheEnabled(cacheEnabled);
         DatabaseDescriptor.setDiskAccessMode(mode);
         alterTable("ALTER TABLE %s WITH compaction = { 'class' :  '" + compactionClass + "'  };");
-        alterTable("ALTER TABLE %s WITH compression = { 'sstable_compression' : '" + compressorClass + "'  };");
+        alterTable("ALTER TABLE %s WITH compression = { 'class' : '" + compressorClass + "'  };");
         ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
         cfs.disableAutoCompaction();
 
-        long onStartTime = System.currentTimeMillis();
+        long onStartTime = currentTimeMillis();
         ExecutorService es = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
         List<Future<?>> tasks = new ArrayList<>();
         for (int ti = 0; ti < 1; ++ti)
@@ -230,7 +231,7 @@ public class CachingBenchTest extends CQLTester
             task.get();
 
         flush();
-        long onEndTime = System.currentTimeMillis();
+        long onEndTime = currentTimeMillis();
         int startRowCount = countRows(cfs);
         int startTombCount = countTombstoneMarkers(cfs);
         int startRowDeletions = countRowDeletions(cfs);
@@ -260,9 +261,9 @@ public class CachingBenchTest extends CQLTester
             System.out.println();
 
         String hashesBefore = getHashes();
-        long startTime = System.currentTimeMillis();
+        long startTime = currentTimeMillis();
         CompactionManager.instance.performMaximal(cfs, true);
-        long endTime = System.currentTimeMillis();
+        long endTime = currentTimeMillis();
 
         int endRowCount = countRows(cfs);
         int endTombCount = countTombstoneMarkers(cfs);
@@ -283,9 +284,9 @@ public class CachingBenchTest extends CQLTester
 
     private String getHashes() throws Throwable
     {
-        long startTime = System.currentTimeMillis();
+        long startTime = currentTimeMillis();
         String hashes = Arrays.toString(getRows(execute(hashQuery))[0]);
-        long endTime = System.currentTimeMillis();
+        long endTime = currentTimeMillis();
         System.out.println(String.format("Hashes: %s, retrieved in %.3fs", hashes, (endTime - startTime) * 1e-3));
         return hashes;
     }
@@ -351,7 +352,7 @@ public class CachingBenchTest extends CQLTester
     int countRows(ColumnFamilyStore cfs)
     {
         boolean enforceStrictLiveness = cfs.metadata().enforceStrictLiveness();
-        int nowInSec = FBUtilities.nowInSeconds();
+        long nowInSec = FBUtilities.nowInSeconds();
         return count(cfs, x -> x.isRow() && ((Row) x).hasLiveData(nowInSec, enforceStrictLiveness));
     }
 

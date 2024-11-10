@@ -28,6 +28,8 @@ import org.apache.cassandra.cql3.UntypedResultSet;
 import org.apache.cassandra.cql3.UntypedResultSet.Row;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
+import org.apache.cassandra.exceptions.InvalidRequestException;
+import org.assertj.core.api.Assertions;
 
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.assertEquals;
@@ -177,6 +179,9 @@ public class UpdateTest extends CQLTester
 
         assertInvalidMessage("Slice restrictions are not supported on the clustering columns in UPDATE statements",
                              "UPDATE %s SET value = ? WHERE partitionKey = ? AND clustering_1 > ?", 7, 0, 1);
+
+        assertInvalidMessage("Slice restrictions are not supported on the clustering columns in UPDATE statements",
+                             "UPDATE %s SET value = ? WHERE partitionKey = ? AND clustering_1 BETWEEN ? AND ?", 7, 0, 1, 2);
     }
 
     @Test
@@ -656,5 +661,15 @@ public class UpdateTest extends CQLTester
         Keyspace keyspace = Keyspace.open(KEYSPACE);
         ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(currentTable());
         return cfs.metric.allMemtablesLiveDataSize.getValue() == 0;
+    }
+
+    @Test
+    public void testAdderNonCounter()
+    {
+        createTable("CREATE TABLE %s (pk int PRIMARY KEY, a int, b text)");
+        Assertions.assertThatThrownBy(() -> execute("UPDATE %s SET a = a + 1, b = b + 'fail' WHERE pk = 1"))
+                  .isInstanceOf(InvalidRequestException.class)
+                  // if error ever includes "b" its safe to update this test
+                  .hasMessage("Invalid operation (a = a + 1) for non counter column a");
     }
 }

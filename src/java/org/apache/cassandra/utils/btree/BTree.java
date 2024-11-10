@@ -37,6 +37,7 @@ import org.apache.cassandra.utils.caching.TinyThreadLocalPool;
 
 import static java.lang.Math.max;
 import static java.lang.Math.min;
+import static org.apache.cassandra.config.CassandraRelevantProperties.BTREE_BRANCH_SHIFT;
 
 public class BTree
 {
@@ -62,7 +63,7 @@ public class BTree
      * subtrees when modifying the tree, since the modified tree would need new parent references).
      * Instead, we store these references in a Path as needed when navigating the tree.
      */
-    public static final int BRANCH_SHIFT = Integer.getInteger("cassandra.btree.branchshift", 5);
+    public static final int BRANCH_SHIFT = BTREE_BRANCH_SHIFT.getInt();
 
     private static final int BRANCH_FACTOR = 1 << BRANCH_SHIFT;
     public static final int MIN_KEYS = BRANCH_FACTOR / 2 - 1;
@@ -112,13 +113,15 @@ public class BTree
         return new Object[]{ value };
     }
 
-    @Deprecated
+    /** @deprecated See CASSANDRA-15510 */
+    @Deprecated(since = "4.0")
     public static <C, K extends C, V extends C> Object[] build(Collection<K> source)
     {
         return build(source, UpdateFunction.noOp());
     }
 
-    @Deprecated
+    /** @deprecated See CASSANDRA-15510 */
+    @Deprecated(since = "4.0")
     public static <C, K extends C, V extends C> Object[] build(Collection<K> source, UpdateFunction<K, V> updateF)
     {
         return build(BulkIterator.of(source.iterator()), source.size(), updateF);
@@ -949,6 +952,9 @@ public class BTree
 
     public static long sizeOfStructureOnHeap(Object[] tree)
     {
+        if (tree == EMPTY_LEAF)
+            return 0;
+
         long size = ObjectSizes.sizeOfArray(tree);
         if (isLeaf(tree))
             return size;
@@ -2199,6 +2205,7 @@ public class BTree
     {
         if (isEmpty(tree))
             return 0;
+
         long size = ObjectSizes.sizeOfArray(tree);
         if (isLeaf(tree))
             return size;
@@ -2212,6 +2219,7 @@ public class BTree
     {
         if (isEmpty(tree))
             return 0;
+
         return ObjectSizes.sizeOfArray(tree);
     }
 
@@ -3309,27 +3317,51 @@ public class BTree
         public void close()
         {
             reset();
-            pool.offer(this);
-            pool = null;
+            if (pool != null)
+            {
+                pool.offer(this);
+                pool = null;
+            }
         }
 
         @Override
         void reset()
         {
-            // we clear precisely to leaf().count and branch.count because, in the case of a builder,
-            // if we ever fill the buffer we will consume it entirely for the tree we are building
-            // so the last count should match the number of non-null entries
-            Arrays.fill(leaf().buffer, 0, leaf().count, null);
+            Arrays.fill(leaf().buffer, null);
             leaf().count = 0;
             BranchBuilder branch = leaf().parent;
             while (branch != null && branch.inUse)
             {
-                Arrays.fill(branch.buffer, 0, branch.count, null);
-                Arrays.fill(branch.buffer, MAX_KEYS, MAX_KEYS + 1 + branch.count, null);
+                Arrays.fill(branch.buffer, null);
                 branch.count = 0;
                 branch.inUse = false;
                 branch = branch.parent;
             }
+        }
+
+        public boolean validateEmpty()
+        {
+            LeafOrBranchBuilder cur = leaf();
+            boolean hasOnlyNulls = true;
+            while (hasOnlyNulls && cur != null)
+            {
+                hasOnlyNulls = hasOnlyNulls(cur.buffer) && hasOnlyNulls(cur.savedBuffer) && cur.savedNextKey == null;
+                cur = cur.parent;
+            }
+            return hasOnlyNulls;
+        }
+
+        private static boolean hasOnlyNulls(Object[] buffer)
+        {
+            if (buffer == null)
+                return true;
+
+            for (int i = 0 ; i < buffer.length ; ++i)
+            {
+                if (buffer[i] != null)
+                    return false;
+            }
+            return true;
         }
     }
 

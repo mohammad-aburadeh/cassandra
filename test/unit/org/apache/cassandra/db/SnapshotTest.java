@@ -18,15 +18,15 @@
 
 package org.apache.cassandra.db;
 
-import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.StandardOpenOption;
 
 import org.junit.Test;
 
 import org.apache.cassandra.cql3.CQLTester;
-import org.apache.cassandra.io.sstable.Component;
+import org.apache.cassandra.io.sstable.format.SSTableFormat.Components;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.io.util.File;
 
 public class SnapshotTest extends CQLTester
 {
@@ -35,10 +35,10 @@ public class SnapshotTest extends CQLTester
     {
         createTable("create table %s (id int primary key, k int)");
         execute("insert into %s (id, k) values (1,1)");
-        getCurrentColumnFamilyStore().forceBlockingFlush();
+        getCurrentColumnFamilyStore().forceBlockingFlush(ColumnFamilyStore.FlushReason.UNIT_TESTS);
         for (SSTableReader sstable : getCurrentColumnFamilyStore().getLiveSSTables())
         {
-            File toc = new File(sstable.descriptor.filenameFor(Component.TOC));
+            File toc = sstable.descriptor.fileFor(Components.TOC);
             Files.write(toc.toPath(), new byte[0], StandardOpenOption.TRUNCATE_EXISTING);
         }
         getCurrentColumnFamilyStore().snapshot("hello");

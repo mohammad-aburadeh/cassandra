@@ -36,7 +36,7 @@ import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.handler.codec.MessageToMessageDecoder;
 import io.netty.handler.codec.MessageToMessageEncoder;
 import io.netty.handler.ssl.SslContext;
-import io.netty.util.concurrent.Promise;
+import io.netty.util.concurrent.Promise; // checkstyle: permit this import
 import io.netty.util.concurrent.PromiseCombiner;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 import io.netty.util.internal.logging.Slf4JLoggerFactory;
@@ -45,14 +45,26 @@ import org.apache.cassandra.config.EncryptionOptions;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.net.*;
+import org.apache.cassandra.security.ISslContextFactory;
 import org.apache.cassandra.security.SSLFactory;
+import org.apache.cassandra.transport.ClientResourceLimits.Overload;
 import org.apache.cassandra.transport.messages.*;
+import org.apache.cassandra.utils.concurrent.NonBlockingRateLimiter;
+import org.apache.cassandra.utils.concurrent.UncheckedInterruptedException;
 
+import static org.apache.cassandra.net.SocketFactory.newSslHandler;
 import static org.apache.cassandra.transport.CQLMessageHandler.envelopeSize;
 import static org.apache.cassandra.transport.Flusher.MAX_FRAMED_PAYLOAD_SIZE;
+import static org.apache.cassandra.transport.PipelineConfigurator.SSL_FACTORY_CONTEXT_DESCRIPTION;
+import static org.apache.cassandra.utils.Clock.Global.currentTimeMillis;
+import static org.apache.cassandra.utils.concurrent.BlockingQueues.newBlockingQueue;
+import static org.apache.cassandra.utils.concurrent.NonBlockingRateLimiter.NO_OP_LIMITER;
 
 public class SimpleClient implements Closeable
 {
+
+    public static final int TIMEOUT_SECONDS = 10;
+
     static
     {
         InternalLoggerFactory.setDefaultFactory(new Slf4JLoggerFactory());
@@ -211,7 +223,7 @@ public class SimpleClient implements Closeable
                     .option(ChannelOption.TCP_NODELAY, true);
 
         // Configure the pipeline factory.
-        if(encryptionOptions.isEnabled())
+        if(encryptionOptions.getEnabled())
         {
             bootstrap.handler(new SecureInitializer(largeMessageThreshold));
         }
@@ -281,7 +293,7 @@ public class SimpleClient implements Closeable
         {
             request.attach(connection);
             lastWriteFuture = channel.writeAndFlush(Collections.singletonList(request));
-            Message.Response msg = responseHandler.responses.poll(10, TimeUnit.SECONDS);
+            Message.Response msg = responseHandler.responses.poll(TIMEOUT_SECONDS, TimeUnit.SECONDS);
             if (msg == null)
                 throw new RuntimeException("timeout");
             if (throwOnErrorResponse && msg instanceof ErrorMessage)
@@ -290,7 +302,7 @@ public class SimpleClient implements Closeable
         }
         catch (InterruptedException e)
         {
-            throw new RuntimeException(e);
+            throw new UncheckedInterruptedException(e);
         }
     }
 
@@ -310,10 +322,10 @@ public class SimpleClient implements Closeable
                 }
                 lastWriteFuture = channel.writeAndFlush(requests);
 
-                long deadline = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(10);
+                long deadline = currentTimeMillis() + TimeUnit.SECONDS.toMillis(TIMEOUT_SECONDS);
                 for (int i = 0; i < requests.size(); i++)
                 {
-                    Message.Response msg = responseHandler.responses.poll(deadline - System.currentTimeMillis(), TimeUnit.MILLISECONDS);
+                    Message.Response msg = responseHandler.responses.poll(deadline - currentTimeMillis(), TimeUnit.MILLISECONDS);
                     if (msg == null)
                         throw new RuntimeException("timeout");
                     if (msg instanceof ErrorMessage)
@@ -332,7 +344,7 @@ public class SimpleClient implements Closeable
         }
         catch (InterruptedException e)
         {
-            throw new RuntimeException(e);
+            throw new UncheckedInterruptedException(e);
         }
     }
 
@@ -343,7 +355,7 @@ public class SimpleClient implements Closeable
 
     public static class SimpleEventHandler implements EventHandler
     {
-        public final LinkedBlockingQueue<Event> queue = new LinkedBlockingQueue<>();
+        public final BlockingQueue<Event> queue = newBlockingQueue();
 
         public void onEvent(Event event)
         {
@@ -354,6 +366,12 @@ public class SimpleClient implements Closeable
     private static class ConnectionTracker implements Connection.Tracker
     {
         public void addConnection(Channel ch, Connection connection) {}
+
+        @Override
+        public boolean isRunning()
+        {
+            return true;
+        }
     }
 
     private static class HandlerNames
@@ -393,7 +411,7 @@ public class SimpleClient implements Closeable
                 case AUTHENTICATE:
                     if (response.header.version.isGreaterOrEqualTo(ProtocolVersion.V5))
                     {
-                        configureModernPipeline(ctx, response);
+                        configureModernPipeline(ctx, response, largeMessageThreshold);
                         // consuming the message is done when setting up the pipeline
                     }
                     else
@@ -404,17 +422,18 @@ public class SimpleClient implements Closeable
                     }
                     break;
                 case SUPPORTED:
+                case ERROR:
                     // just pass through
                     results.add(response);
                     break;
                 default:
                     throw new ProtocolException(String.format("Unexpected %s response expecting " +
-                                                              "READY, AUTHENTICATE or SUPPORTED",
+                                                              "READY, AUTHENTICATE, ERROR or SUPPORTED",
                                                               response.header.type));
             }
         }
 
-        private void configureModernPipeline(ChannelHandlerContext ctx, Envelope response)
+        private void configureModernPipeline(ChannelHandlerContext ctx, Envelope response, int largeMessageThreshold)
         {
             logger.info("Configuring modern pipeline");
             ChannelPipeline pipeline = ctx.pipeline();
@@ -434,8 +453,17 @@ public class SimpleClient implements Closeable
             FrameEncoder frameEncoder = frameEncoder(ctx);
             FrameEncoder.PayloadAllocator payloadAllocator = frameEncoder.allocator();
 
-            CQLMessageHandler.MessageConsumer<Message.Response> responseConsumer = (c, message, converter) -> {
-                responseHandler.handleResponse(c, message);
+            CQLMessageHandler.MessageConsumer<Message.Response> responseConsumer = new CQLMessageHandler.MessageConsumer<Message.Response>()
+            {
+                public void dispatch(Channel channel, Message.Response message, Dispatcher.FlushItemConverter toFlushItem, Overload backpressure)
+                {
+                    responseHandler.handleResponse(channel, message);
+                }
+
+                public boolean hasQueueCapacity()
+                {
+                    return true;
+                }
             };
 
             CQLMessageHandler.ErrorHandler errorHandler = (error) -> {
@@ -470,6 +498,12 @@ public class SimpleClient implements Closeable
                     return endpointQueue;
                 }
 
+                @Override
+                public NonBlockingRateLimiter requestRateLimiter()
+                {
+                    return NO_OP_LIMITER;
+                }
+
                 public void release()
                 {
                 }
@@ -484,6 +518,7 @@ public class SimpleClient implements Closeable
                                         responseConsumer,
                                         payloadAllocator,
                                         queueCapacity,
+                                        QueueBackpressure.NO_OP,
                                         resources,
                                         handler -> {},
                                         errorHandler,
@@ -512,7 +547,7 @@ public class SimpleClient implements Closeable
                     Connection connection = ctx.channel().attr(Connection.attributeKey).get();
                     // The only case the connection can be null is when we send the initial STARTUP message (client side thus)
                     ProtocolVersion version = connection == null ? ProtocolVersion.CURRENT : connection.getVersion();
-                    SimpleFlusher flusher = new SimpleFlusher(frameEncoder);
+                    SimpleFlusher flusher = new SimpleFlusher(frameEncoder, largeMessageThreshold);
                     for (Message message : (List<Message>) msg)
                         flusher.enqueue(message.encode(version));
 
@@ -522,7 +557,7 @@ public class SimpleClient implements Closeable
             pipeline.remove(this);
 
             Message.Response message = messageDecoder.decode(ctx.channel(), response);
-            responseConsumer.accept(channel, message, (ch, req, resp) -> null);
+            responseConsumer.dispatch(channel, message, (ch, req, resp) -> null, Overload.NONE);
         }
 
         private FrameDecoder frameDecoder(ChannelHandlerContext ctx, BufferPoolAllocator allocator)
@@ -605,9 +640,10 @@ public class SimpleClient implements Closeable
         protected void initChannel(Channel channel) throws Exception
         {
             super.initChannel(channel);
-            SslContext sslContext = SSLFactory.getOrCreateSslContext(encryptionOptions, encryptionOptions.require_client_auth,
-                                                                     SSLFactory.SocketType.CLIENT);
-            channel.pipeline().addFirst("ssl", sslContext.newHandler(channel.alloc()));
+            SslContext sslContext = SSLFactory.getOrCreateSslContext(encryptionOptions, encryptionOptions.getClientAuth(),
+                                                                     ISslContextFactory.SocketType.CLIENT, SSL_FACTORY_CONTEXT_DESCRIPTION);
+            InetSocketAddress peer = encryptionOptions.require_endpoint_verification ? new InetSocketAddress(host, port) : null;
+            channel.pipeline().addFirst("ssl", newSslHandler(channel, sslContext, peer));
         }
     }
 
@@ -639,9 +675,9 @@ public class SimpleClient implements Closeable
                 else
                     responses.put(r);
             }
-            catch (InterruptedException ie)
+            catch (InterruptedException e)
             {
-                throw new RuntimeException(ie);
+                throw new UncheckedInterruptedException(e);
             }
         }
 
@@ -669,10 +705,17 @@ public class SimpleClient implements Closeable
         final Queue<Envelope> outbound = new ConcurrentLinkedQueue<>();
         final FrameEncoder frameEncoder;
         private final AtomicBoolean scheduled = new AtomicBoolean(false);
+        private final int largeMessageThreshold;
+
+        SimpleFlusher(FrameEncoder frameEncoder, int largeMessageThreshold)
+        {
+            this.frameEncoder = frameEncoder;
+            this.largeMessageThreshold = largeMessageThreshold;
+        }
 
         SimpleFlusher(FrameEncoder frameEncoder)
         {
-            this.frameEncoder = frameEncoder;
+            this(frameEncoder, MAX_FRAMED_PAYLOAD_SIZE);
         }
 
         public void enqueue(Envelope message)
@@ -709,14 +752,14 @@ public class SimpleClient implements Closeable
             Envelope f;
             while ((f = outbound.poll()) != null)
             {
-                if (f.header.bodySizeInBytes > MAX_FRAMED_PAYLOAD_SIZE)
+                if (f.header.bodySizeInBytes > largeMessageThreshold)
                 {
                     combiner.addAll(writeLargeMessage(ctx, f));
                 }
                 else
                 {
                     int messageSize = envelopeSize(f.header);
-                    if (bufferSize + messageSize >= MAX_FRAMED_PAYLOAD_SIZE)
+                    if (bufferSize + messageSize >= largeMessageThreshold)
                     {
                         logger.trace("Sending frame of size: {}", bufferSize);
                         combiner.add(flushBuffer(ctx, buffer, bufferSize));
@@ -756,9 +799,9 @@ public class SimpleClient implements Closeable
         private FrameEncoder.Payload allocate(int size, boolean selfContained)
         {
             FrameEncoder.Payload payload = frameEncoder.allocator()
-                                                       .allocate(selfContained, Math.min(size, MAX_FRAMED_PAYLOAD_SIZE));
-            if (size >= MAX_FRAMED_PAYLOAD_SIZE)
-                payload.buffer.limit(MAX_FRAMED_PAYLOAD_SIZE);
+                                                       .allocate(selfContained, Math.min(size, largeMessageThreshold));
+            if (size >= largeMessageThreshold)
+                payload.buffer.limit(largeMessageThreshold);
 
             return payload;
         }
@@ -771,14 +814,14 @@ public class SimpleClient implements Closeable
             boolean firstFrame = true;
             while (f.body.readableBytes() > 0 || firstFrame)
             {
-                int payloadSize = Math.min(f.body.readableBytes(), MAX_FRAMED_PAYLOAD_SIZE);
+                int payloadSize = Math.min(f.body.readableBytes(), largeMessageThreshold);
                 payload = allocate(f.body.readableBytes(), false);
 
                 buf = payload.buffer;
                 // BufferPool may give us a buffer larger than we asked for.
                 // FrameEncoder may object if buffer.remaining is >= MAX_SIZE.
-                if (payloadSize >= MAX_FRAMED_PAYLOAD_SIZE)
-                    buf.limit(MAX_FRAMED_PAYLOAD_SIZE);
+                if (payloadSize >= largeMessageThreshold)
+                    buf.limit(largeMessageThreshold);
 
                 if (firstFrame)
                 {

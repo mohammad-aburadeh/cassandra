@@ -22,6 +22,7 @@ import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
+import org.apache.cassandra.cache.IMeasurableMemory;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.schema.ColumnMetadata;
@@ -49,7 +50,7 @@ import org.apache.cassandra.utils.memory.Cloner;
  * it's own data. For instance, a {@code Row} cannot contains a cell that is deleted by its own
  * row deletion.
  */
-public interface Row extends Unfiltered, Iterable<ColumnData>
+public interface Row extends Unfiltered, Iterable<ColumnData>, IMeasurableMemory
 {
     /**
      * The clustering values for this row.
@@ -116,10 +117,10 @@ public interface Row extends Unfiltered, Iterable<ColumnData>
      * 
      * @param nowInSec the current time to decide what is deleted and what isn't
      * @param enforceStrictLiveness whether the row should be purged if there is no PK liveness info,
-     *                              normally retrieved from {@link CFMetaData#enforceStrictLiveness()}
+     *                              normally retrieved from {@link TableMetadata#enforceStrictLiveness()}
      * @return true if there is some live information
      */
-    public boolean hasLiveData(int nowInSec, boolean enforceStrictLiveness);
+    public boolean hasLiveData(long nowInSec, boolean enforceStrictLiveness);
 
     /**
      * Returns a cell for a simple column.
@@ -149,10 +150,10 @@ public interface Row extends Unfiltered, Iterable<ColumnData>
     public ComplexColumnData getComplexColumnData(ColumnMetadata c);
 
     /**
-     * The data for a regular or complex column.
+     * Returns the {@link ColumnData} for the specified column.
      *
-     * @param c the column for which to return the complex data.
-     * @return the data for {@code c} or {@code null} if the row has no data for this column.
+     * @param c the column for which to fetch the data.
+     * @return the data for the column or {@code null} if the row has no data for this column.
      */
     public ColumnData getColumnData(ColumnMetadata c);
 
@@ -202,7 +203,7 @@ public interface Row extends Unfiltered, Iterable<ColumnData>
      *
      * @param nowInSec the current time in seconds to decid if a cell is expired.
      */
-    public boolean hasDeletion(int nowInSec);
+    public boolean hasDeletion(long nowInSec);
 
     /**
      * An iterator to efficiently search data for a given column.
@@ -266,7 +267,7 @@ public interface Row extends Unfiltered, Iterable<ColumnData>
      * @return this row but without any deletion info purged by {@code purger}. If the purged row is empty, returns
      *         {@code null}.
      */
-    public Row purge(DeletionPurger purger, int nowInSec, boolean enforceStrictLiveness);
+    public Row purge(DeletionPurger purger, long nowInSec, boolean enforceStrictLiveness);
 
     /**
      * Returns a copy of this row which only include the data queried by {@code filter}, excluding anything _fetched_ for
@@ -277,6 +278,11 @@ public interface Row extends Unfiltered, Iterable<ColumnData>
      * @return the row but with all data that wasn't queried by the user skipped.
      */
     public Row withOnlyQueriedData(ColumnFilter filter);
+
+    /*
+     * Returns a copy of this row without any data with a timestamp older than the one provided
+     */
+    public Row purgeDataOlderThan(long timestamp, boolean enforceStrictLiveness);
 
     /**
      * Returns a copy of this row where all counter cells have they "local" shard marked for clearing.
@@ -310,6 +316,7 @@ public interface Row extends Unfiltered, Iterable<ColumnData>
     public long unsharedHeapSizeExcludingData();
 
     public String toString(TableMetadata metadata, boolean fullDetails);
+    public long unsharedHeapSize();
 
     /**
      * Apply a function to every column in a row
@@ -354,7 +361,7 @@ public interface Row extends Unfiltered, Iterable<ColumnData>
     public static class Deletion
     {
         public static final Deletion LIVE = new Deletion(DeletionTime.LIVE, false);
-        private static final long EMPTY_SIZE = ObjectSizes.measure(new DeletionTime(0, 0));
+        private static final long EMPTY_SIZE = ObjectSizes.measure(DeletionTime.build(0, 0));
 
         private final DeletionTime time;
         private final boolean isShadowable;
@@ -371,7 +378,8 @@ public interface Row extends Unfiltered, Iterable<ColumnData>
             return time.isLive() ? LIVE : new Deletion(time, false);
         }
 
-        @Deprecated
+        /** @deprecated See CAASSANDRA-10261 */
+        @Deprecated(since = "4.0")
         public static Deletion shadowable(DeletionTime time)
         {
             return new Deletion(time, true);
@@ -650,6 +658,14 @@ public interface Row extends Unfiltered, Iterable<ColumnData>
         public SimpleBuilder delete();
 
         /**
+         * Deletes the whole row with a timestamp that is just before the new data's timestamp, to make sure no expired
+         * data remains on the row.
+         *
+         * @return this builder.
+         */
+        public SimpleBuilder deletePrevious();
+
+        /**
          * Removes the value for a given column (creating a tombstone).
          *
          * @param columnName the name of the column to delete.
@@ -711,7 +727,6 @@ public interface Row extends Unfiltered, Iterable<ColumnData>
             lastRowSet = i;
         }
 
-        @SuppressWarnings("resource")
         public Row merge(DeletionTime activeDeletion)
         {
             // If for this clustering we have only one row version and have no activeDeletion (i.e. nothing to filter out),
@@ -820,7 +835,6 @@ public interface Row extends Unfiltered, Iterable<ColumnData>
                 return ColumnMetadataVersionComparator.INSTANCE.compare(column, dataColumn) < 0;
             }
 
-            @SuppressWarnings("resource")
             protected ColumnData getReduced()
             {
                 if (column.isSimple())

@@ -31,6 +31,8 @@ import org.junit.Test;
 
 import org.apache.cassandra.exceptions.SyntaxException;
 
+import static org.apache.cassandra.utils.LocalizeString.toLowerCaseLocalized;
+
 /**
  * This class tests all keywords which took a long time. Hence it was split into multiple
  * KeywordTestSplitN to prevent CI timing out. If timeouts reappear split it further
@@ -44,7 +46,7 @@ public abstract class KeywordTestBase extends CQLTester
                                                       return new Object[] { keyword,ReservedKeywords.isReserved(keyword) };
                                                   })
                                                   .collect(Collectors.toList());
-    
+
     public static Collection<Object[]> getKeywordsForSplit(int split, int totalSplits)
     {
         return Sets.newHashSet(Lists.partition(KeywordTestBase.keywords, KeywordTestBase.keywords.size() / totalSplits)
@@ -105,7 +107,7 @@ public abstract class KeywordTestBase extends CQLTester
             logger.info(selectStatement);
             rs = execute(selectStatement);
             row = rs.one();
-            String value = row.getString(keyword.toLowerCase());
+            String value = row.getString(toLowerCaseLocalized(keyword));
             Assert.assertEquals(keyword, value);
 
             /* Make a materialized view using the fields (cannot re-use the name as MV must be in same keyspace).

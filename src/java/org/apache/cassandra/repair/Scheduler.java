@@ -24,21 +24,18 @@ import java.util.concurrent.Executor;
 import java.util.function.Supplier;
 import javax.annotation.concurrent.GuardedBy;
 
-import com.google.common.util.concurrent.AbstractFuture;
-import com.google.common.util.concurrent.FutureCallback;
-import com.google.common.util.concurrent.Futures;
-import com.google.common.util.concurrent.ListenableFuture;
-
 import org.apache.cassandra.utils.Pair;
+import org.apache.cassandra.utils.concurrent.AsyncFuture;
+import org.apache.cassandra.utils.concurrent.Future;
 
 /**
  * Task scheduler that limits the number of concurrent tasks across multiple executors.
  */
 public interface Scheduler
 {
-    default <T> ListenableFuture<T> schedule(Supplier<ListenableFuture<T>> task, Executor executor)
+    default <T> Future<T> schedule(Supplier<Future<T>> task, Executor executor)
     {
-        return schedule(new Task<>(task, executor), executor);
+        return schedule(new Task<>(task), executor);
     }
 
     <T> Task<T> schedule(Task<T> task, Executor executor);
@@ -93,50 +90,29 @@ public interface Scheduler
                 return;
             inflight++;
             Pair<Task<?>, Executor> pair = tasks.poll();
-            Futures.addCallback(pair.left, new FutureCallback<Object>() {
-                @Override
-                public void onSuccess(Object result)
-                {
-                    onDone();
-                }
-
-                @Override
-                public void onFailure(Throwable t)
-                {
-                    onDone();
-                }
-            }, pair.right);
+            pair.left.addCallback((s, f) -> onDone());
             pair.right.execute(pair.left);
         }
     }
 
-    class Task<T> extends AbstractFuture<T> implements Runnable
+    class Task<T> extends AsyncFuture<T> implements Runnable
     {
-        private final Supplier<ListenableFuture<T>> supplier;
-        private final Executor executor;
+        private final Supplier<Future<T>> supplier;
 
-        public Task(Supplier<ListenableFuture<T>> supplier, Executor executor)
+        public Task(Supplier<Future<T>> supplier)
         {
             this.supplier = supplier;
-            this.executor = executor;
         }
 
         @Override
         public void run()
         {
-            Futures.addCallback(supplier.get(), new FutureCallback<T>() {
-                @Override
-                public void onSuccess(T result)
-                {
-                    set(result);
-                }
-
-                @Override
-                public void onFailure(Throwable t)
-                {
-                    setException(t);
-                }
-            }, executor);
+            supplier.get().addCallback((s, f) -> {
+                if (f != null)
+                    tryFailure(f);
+                else
+                    trySuccess(s);
+            });
         }
     }
 }

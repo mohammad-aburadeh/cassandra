@@ -28,13 +28,18 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
+import org.apache.cassandra.ServerTestUtils;
 import org.apache.cassandra.UpdateBuilder;
+import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.PartitionPosition;
 import org.apache.cassandra.db.compaction.CompactionManager;
-import org.apache.cassandra.io.sstable.Component;
+import org.apache.cassandra.distributed.shared.WithProperties;
+import org.apache.cassandra.io.sstable.VerifyTest;
+import org.apache.cassandra.io.sstable.format.SSTableFormat.Components;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.io.sstable.format.big.BigTableVerifier;
 import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.tools.ToolRunner.ToolResult;
@@ -42,29 +47,32 @@ import org.apache.cassandra.utils.ByteBufferUtil;
 import org.assertj.core.api.Assertions;
 
 import static org.apache.cassandra.SchemaLoader.standardCFMD;
+import static org.apache.cassandra.config.CassandraRelevantProperties.TEST_UTIL_ALLOW_TOOL_REINIT_FOR_TEST;
 import static org.junit.Assert.assertEquals;
 
 /**
  * Class that tests tables for {@link StandaloneVerifier} by updating using {@link SchemaLoader}
  * Similar in vein to other {@link SchemaLoader} type tests, as well as {@link StandaloneUpgraderOnSStablesTest}.
- * Since the tool mainly exercises the {@link org.apache.cassandra.db.compaction.Verifier}, we elect to
- * not run every conceivable option as many tests are already covered by {@link org.apache.cassandra.db.VerifyTest}.
+ * Since the tool mainly exercises the {@link BigTableVerifier}, we elect to
+ * not run every conceivable option as many tests are already covered by {@link VerifyTest}.
  * 
  * Note: the complete coverage is composed of:
  * - {@link StandaloneVerifierOnSSTablesTest}
  * - {@link StandaloneVerifierTest}
- * - {@link org.apache.cassandra.db.VerifyTest}
+ * - {@link VerifyTest}
  */
 public class StandaloneVerifierOnSSTablesTest extends OfflineToolUtils
 {
+    static WithProperties properties;
+
     @BeforeClass
     public static void setup()
     {
         // since legacy tables test data uses ByteOrderedPartitioner that's what we need
         // for the check version to work
-        System.setProperty("cassandra.partitioner", "org.apache.cassandra.dht.ByteOrderedPartitioner");
-        System.setProperty(Util.ALLOW_TOOL_REINIT_FOR_TEST, "true"); // Necessary for testing`
-        SchemaLoader.loadSchema();
+        CassandraRelevantProperties.PARTITIONER.setString("org.apache.cassandra.dht.ByteOrderedPartitioner");
+        properties = new WithProperties().set(TEST_UTIL_ALLOW_TOOL_REINIT_FOR_TEST, true);
+        ServerTestUtils.prepareServerNoRegister();
         StorageService.instance.initServer();
     }
 
@@ -72,7 +80,7 @@ public class StandaloneVerifierOnSSTablesTest extends OfflineToolUtils
     public static void teardown() throws Exception
     {
         SchemaLoader.cleanupAndLeaveDirs();
-        System.clearProperty(Util.ALLOW_TOOL_REINIT_FOR_TEST);
+        properties.close();
     }
 
     @Test
@@ -83,9 +91,8 @@ public class StandaloneVerifierOnSSTablesTest extends OfflineToolUtils
 
         createAndPopulateTable(keyspaceName, workingTable, x -> {});
 
-        ToolResult tool = ToolRunner.invokeClass(StandaloneVerifier.class, keyspaceName, workingTable, "-c");
+        ToolResult tool = ToolRunner.invokeClass(StandaloneVerifier.class, keyspaceName, workingTable, "--force", "-c");
         assertEquals(0, tool.getExitCode());
-        assertCorrectEnvPostTest();
         tool.assertOnCleanExit();
     }
 
@@ -98,13 +105,13 @@ public class StandaloneVerifierOnSSTablesTest extends OfflineToolUtils
         createAndPopulateTable(keyspace, tableName, cfs -> {
             // let's just copy old version files from test data into the source dir
             File testDataDir = new File("test/data/legacy-sstables/ma/legacy_tables/legacy_ma_simple");
-            for (File cfsDir : cfs.getDirectories().getCFDirectories())
+            for (org.apache.cassandra.io.util.File cfsDir : cfs.getDirectories().getCFDirectories())
             {
-                FileUtils.copyDirectory(testDataDir, cfsDir);
+                FileUtils.copyDirectory(testDataDir, cfsDir.toJavaIOFile());
             }
         });
 
-        ToolResult tool = ToolRunner.invokeClass(StandaloneVerifier.class, keyspace, tableName, "-c");
+        ToolResult tool = ToolRunner.invokeClass(StandaloneVerifier.class, keyspace, tableName, "-f", "-c");
 
         assertEquals(1, tool.getExitCode());
         Assertions.assertThat(tool.getStdout()).contains("is not the latest version, run upgradesstables");
@@ -118,9 +125,8 @@ public class StandaloneVerifierOnSSTablesTest extends OfflineToolUtils
 
         createAndPopulateTable(keyspaceName, workingTable, x -> {});
 
-        ToolResult tool = ToolRunner.invokeClass(StandaloneVerifier.class, keyspaceName, workingTable);
+        ToolResult tool = ToolRunner.invokeClass(StandaloneVerifier.class, keyspaceName, workingTable, "--force");
         assertEquals(0, tool.getExitCode());
-        assertCorrectEnvPostTest();
         tool.assertOnCleanExit();
     }
 
@@ -131,14 +137,14 @@ public class StandaloneVerifierOnSSTablesTest extends OfflineToolUtils
         String corruptStatsTable = "corruptStatsTable";
         createAndPopulateTable(keyspaceName, corruptStatsTable, cfs -> {
             SSTableReader sstable = cfs.getLiveSSTables().iterator().next();
-            try (RandomAccessFile file = new RandomAccessFile(sstable.descriptor.filenameFor(Component.STATS), "rw"))
+            try (RandomAccessFile file = new RandomAccessFile(sstable.descriptor.fileFor(Components.STATS).toJavaIOFile(), "rw"))
             {
                 file.seek(0);
                 file.writeBytes(StringUtils.repeat('z', 2));
             }
         });
 
-        ToolResult tool = ToolRunner.invokeClass(StandaloneVerifier.class, keyspaceName, corruptStatsTable);
+        ToolResult tool = ToolRunner.invokeClass(StandaloneVerifier.class, keyspaceName, corruptStatsTable, "-f");
 
         assertEquals(1, tool.getExitCode());
         Assertions.assertThat(tool.getStderr()).contains("Error Loading", corruptStatsTable);
@@ -152,8 +158,8 @@ public class StandaloneVerifierOnSSTablesTest extends OfflineToolUtils
 
         createAndPopulateTable(keyspaceName, corruptDataTable, cfs -> {
             SSTableReader sstable = cfs.getLiveSSTables().iterator().next();
-            long row0Start = sstable.getPosition(PartitionPosition.ForKey.get(ByteBufferUtil.bytes("0"), cfs.getPartitioner()), SSTableReader.Operator.EQ).position;
-            long row1Start = sstable.getPosition(PartitionPosition.ForKey.get(ByteBufferUtil.bytes("1"), cfs.getPartitioner()), SSTableReader.Operator.EQ).position;
+            long row0Start = sstable.getPosition(PartitionPosition.ForKey.get(ByteBufferUtil.bytes("0"), cfs.getPartitioner()), SSTableReader.Operator.EQ);
+            long row1Start = sstable.getPosition(PartitionPosition.ForKey.get(ByteBufferUtil.bytes("1"), cfs.getPartitioner()), SSTableReader.Operator.EQ);
             long startPosition = Math.min(row0Start, row1Start);
 
             try (RandomAccessFile file = new RandomAccessFile(sstable.getFilename(), "rw"))
@@ -163,7 +169,7 @@ public class StandaloneVerifierOnSSTablesTest extends OfflineToolUtils
             }
         });
 
-        ToolResult tool = ToolRunner.invokeClass(StandaloneVerifier.class, keyspaceName, corruptDataTable);
+        ToolResult tool = ToolRunner.invokeClass(StandaloneVerifier.class, keyspaceName, corruptDataTable, "--force");
         assertEquals(1, tool.getExitCode());
         Assertions.assertThat(tool.getStdout()).contains("Invalid SSTable", corruptDataTable);
     }
@@ -217,6 +223,6 @@ public class StandaloneVerifierOnSSTablesTest extends OfflineToolUtils
                          .apply();
         }
 
-        cfs.forceBlockingFlush();
+        org.apache.cassandra.Util.flush(cfs);
     }
 }

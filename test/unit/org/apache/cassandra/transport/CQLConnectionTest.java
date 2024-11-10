@@ -31,7 +31,8 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.*;
 
 import com.google.common.util.concurrent.Uninterruptibles;
-import org.awaitility.Awaitility;
+
+import org.apache.cassandra.transport.ClientResourceLimits.Overload;
 import org.junit.Before;
 import org.junit.Test;
 import org.slf4j.Logger;
@@ -56,11 +57,16 @@ import org.apache.cassandra.service.NativeTransportService;
 import org.apache.cassandra.transport.CQLMessageHandler.MessageConsumer;
 import org.apache.cassandra.transport.messages.*;
 import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.utils.concurrent.SimpleCondition;
+import org.apache.cassandra.utils.concurrent.NonBlockingRateLimiter;
+import org.apache.cassandra.utils.concurrent.Condition;
+import org.awaitility.Awaitility;
 
 import static org.apache.cassandra.config.EncryptionOptions.TlsEncryptionPolicy.UNENCRYPTED;
+import static org.apache.cassandra.io.util.FileUtils.ONE_MIB;
 import static org.apache.cassandra.net.FramingTest.randomishBytes;
 import static org.apache.cassandra.transport.Flusher.MAX_FRAMED_PAYLOAD_SIZE;
+import static org.apache.cassandra.utils.concurrent.Condition.newOneTimeCondition;
+import static org.apache.cassandra.utils.concurrent.NonBlockingRateLimiter.NO_OP_LIMITER;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -103,6 +109,8 @@ public class CQLConnectionTest
         alloc = GlobalBufferPoolAllocator.instance;
         // set connection-local queue size to 0 so that all capacity is allocated from reserves
         DatabaseDescriptor.setNativeTransportReceiveQueueCapacityInBytes(0);
+        // set transport to max frame size possible
+        DatabaseDescriptor.setNativeTransportMaxFrameSize(256 * (int) ONE_MIB);
     }
 
     @Test
@@ -176,7 +184,7 @@ public class CQLConnectionTest
         // after the error is first received and we race between handling the exception
         // caused by remote disconnection and checking the connection status.
 
-        Function<ByteBuf, ByteBuf> corruptor = new Function<ByteBuf, ByteBuf>()
+        Function<ByteBuf, ByteBuf> corruptor = new Function<>()
         {
             // Don't corrupt the first frame as this would fail early and bypass capacity allocation.
             // Instead, allow enough bytes to fill the first frame through untouched. Then, corrupt
@@ -501,7 +509,7 @@ public class CQLConnectionTest
                                   .withPort(port)
                                   .withPipelineConfigurator(configurator)
                                   .build();
-        ClientMetrics.instance.init(Collections.singleton(server));
+        ClientMetrics.instance.init(server);
         return server;
     }
 
@@ -626,7 +634,7 @@ public class CQLConnectionTest
             this.frameEncoder = frameEncoder;
         }
 
-        public void accept(Channel channel, Message.Request message, Dispatcher.FlushItemConverter toFlushItem)
+        public void dispatch(Channel channel, Message.Request message, Dispatcher.FlushItemConverter toFlushItem, Overload backpressure)
         {
             if (flusher == null)
                 flusher = new SimpleClient.SimpleFlusher(frameEncoder);
@@ -644,11 +652,17 @@ public class CQLConnectionTest
             Flusher.FlushItem.Framed item = (Flusher.FlushItem.Framed)toFlushItem.toFlushItem(channel, message, fixedResponse);
             item.release();
         }
+
+        @Override
+        public boolean hasQueueCapacity()
+        {
+            return true;
+        }
     }
 
     static class ServerConfigurator extends PipelineConfigurator
     {
-        private final SimpleCondition pipelineReady = new SimpleCondition();
+        private final Condition pipelineReady = newOneTimeCondition();
         private final MessageConsumer<Message.Request> consumer;
         private final AllocationObserver allocationObserver;
         private final Message.Decoder<Message.Request> decoder;
@@ -759,6 +773,12 @@ public class CQLConnectionTest
                     return delegate.endpointWaitQueue();
                 }
 
+                @Override
+                public NonBlockingRateLimiter requestRateLimiter()
+                {
+                    return NO_OP_LIMITER;
+                }
+                
                 public void release()
                 {
                     delegate.release();
@@ -1071,7 +1091,7 @@ public class CQLConnectionTest
             options.put(StartupMessage.CQL_VERSION, QueryProcessor.CQL_VERSION.toString());
             if (codec.encoder instanceof FrameEncoderLZ4)
                 options.put(StartupMessage.COMPRESSION, "LZ4");
-            Connection connection = new Connection(channel, ProtocolVersion.V5, (ch, connection1) -> {});
+            Connection connection = new Connection(channel, ProtocolVersion.V5, new NoOpTracker());
             channel.attr(Connection.attributeKey).set(connection);
             channel.writeAndFlush(new StartupMessage(options)).sync();
 
@@ -1143,6 +1163,16 @@ public class CQLConnectionTest
             Envelope f;
             while ((f = inboundMessages.poll()) != null)
                 f.release();
+        }
+    }
+
+    private static class NoOpTracker implements Connection.Tracker
+    {
+        public void addConnection(Channel ch, Connection connection) {}
+
+        public boolean isRunning()
+        {
+            return true;
         }
     }
 }

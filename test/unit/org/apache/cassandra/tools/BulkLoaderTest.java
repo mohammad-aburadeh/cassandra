@@ -21,6 +21,7 @@ package org.apache.cassandra.tools;
 import org.junit.Test;
 
 import com.datastax.driver.core.exceptions.NoHostAvailableException;
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.tools.ToolRunner.ToolResult;
 import org.hamcrest.CoreMatchers;
 
@@ -36,7 +37,10 @@ public class BulkLoaderTest extends OfflineToolUtils
         assertEquals(1, tool.getExitCode());
         assertThat(tool.getCleanedStderr(), CoreMatchers.containsString("Missing sstable directory argument"));
         
-        assertNoUnexpectedThreadsStarted(null, null);
+        assertNoUnexpectedThreadsStarted(new String[] { "ObjectCleanerThread",
+                                                        "Shutdown-checker",
+                                                        "cluster[0-9]-connection-reaper-[0-9]" },
+                                         false);
         assertSchemaNotLoaded();
         assertCLSMNotLoaded();
         assertSystemKSNotLoaded();
@@ -58,7 +62,15 @@ public class BulkLoaderTest extends OfflineToolUtils
         if (!(tool.getException().getCause().getCause().getCause() instanceof NoHostAvailableException))
             throw tool.getException();
 
-        assertNoUnexpectedThreadsStarted(null, new String[]{"globalEventExecutor-1-1", "globalEventExecutor-1-2"});
+        assertNoUnexpectedThreadsStarted(new String[] { "ObjectCleanerThread",
+                                                        "globalEventExecutor-[1-9]-[1-9]",
+                                                        "globalEventExecutor-[1-9]-[1-9]",
+                                                        "Shutdown-checker",
+                                                        "cluster[0-9]-connection-reaper-[0-9]",
+                                                        "Attach Listener",
+                                                        "process reaper",
+                                                        "JNA Cleaner"},
+                                         false);
         assertSchemaNotLoaded();
         assertCLSMNotLoaded();
         assertSystemKSNotLoaded();
@@ -82,13 +94,21 @@ public class BulkLoaderTest extends OfflineToolUtils
         if (!(tool.getException().getCause().getCause().getCause() instanceof NoHostAvailableException))
             throw tool.getException();
 
-        assertNoUnexpectedThreadsStarted(null, new String[] { "globalEventExecutor-1-1", "globalEventExecutor-1-2",
-                                                                                 // the driver isn't expected to terminate threads on close synchronously (CASSANDRA-19000)
-                                                                                 "cluster[0-9]-nio-worker-[0-9]" });
-        assertSchemaNotLoaded();
-        assertCLSMNotLoaded();
-        assertSystemKSNotLoaded();
-        assertKeyspaceNotLoaded();
+        assertNoUnexpectedThreadsStarted(new String[] { "ObjectCleanerThread",
+                                                        "globalEventExecutor-[1-9]-[1-9]",
+                                                        "globalEventExecutor-[1-9]-[1-9]",
+                                                        "Shutdown-checker",
+                                                        "cluster[0-9]-connection-reaper-[0-9]",
+                                                        "Attach Listener",
+                                                        "process reaper",
+                                                        "JNA Cleaner",
+                                                        // the driver isn't expected to terminate threads on close synchronously (CASSANDRA-19000)
+                                                        "cluster[0-9]-nio-worker-[0-9]" },
+                                         false);
+    assertSchemaNotLoaded();
+    assertCLSMNotLoaded();
+    assertSystemKSNotLoaded();
+    assertKeyspaceNotLoaded();
         assertServerNotLoaded();
     }
 
@@ -108,10 +128,17 @@ public class BulkLoaderTest extends OfflineToolUtils
         if (!(tool.getException().getCause().getCause().getCause() instanceof NoHostAvailableException))
             throw tool.getException();
 
-        assertNoUnexpectedThreadsStarted(null, new String[] { "globalEventExecutor-1-1",
-                                                                                 "globalEventExecutor-1-2",
-                                                                                 // the driver isn't expected to terminate threads on close synchronously (CASSANDRA-19000)
-                                                                                 "cluster[0-9]-nio-worker-[0-9]" });
+        assertNoUnexpectedThreadsStarted(new String[] { "ObjectCleanerThread",
+                                                        "globalEventExecutor-[1-9]-[1-9]",
+                                                        "globalEventExecutor-[1-9]-[1-9]",
+                                                        "Shutdown-checker",
+                                                        "cluster[0-9]-connection-reaper-[0-9]",
+                                                        "Attach Listener",
+                                                        "process reaper",
+                                                        "JNA Cleaner",
+                                                        // the driver isn't expected to terminate threads on close synchronously (CASSANDRA-19000)
+                                                        "cluster[0-9]-nio-worker-[0-9]" },
+                                         false);
         assertSchemaNotLoaded();
         assertCLSMNotLoaded();
         assertSystemKSNotLoaded();
@@ -140,6 +167,52 @@ public class BulkLoaderTest extends OfflineToolUtils
                                                  "127.9.9.1:9041",
                                                  OfflineToolUtils.sstableDirName("legacy_sstables", "legacy_ma_simple"));
         assertEquals(-1, tool.getExitCode());
+        throw tool.getException().getCause().getCause().getCause();
+    }
+
+    @Test(expected = NoHostAvailableException.class)
+    public void testBulkLoader_WithArgs5() throws Throwable
+    {
+        ToolResult tool = ToolRunner.invokeClass(BulkLoader.class,
+                                                 "-d",
+                                                 "127.9.9.1:9041",
+                                                 "--throttle",
+                                                 "10",
+                                                 "--inter-dc-throttle",
+                                                 "15",
+                                                 "--entire-sstable-throttle-mib",
+                                                 "20",
+                                                 "--entire-sstable-inter-dc-throttle-mib",
+                                                 "25",
+                                                 OfflineToolUtils.sstableDirName("legacy_sstables", "legacy_ma_simple"));
+        assertEquals(-1, tool.getExitCode());
+        assertEquals(10 * 125_000, DatabaseDescriptor.getStreamThroughputOutboundBytesPerSec(), 0.0);
+        assertEquals(15 * 125_000, DatabaseDescriptor.getInterDCStreamThroughputOutboundBytesPerSec(), 0.0);
+        assertEquals(20, DatabaseDescriptor.getEntireSSTableStreamThroughputOutboundMebibytesPerSec(), 0.0);
+        assertEquals(25, DatabaseDescriptor.getEntireSSTableInterDCStreamThroughputOutboundMebibytesPerSec(), 0.0);
+        throw tool.getException().getCause().getCause().getCause();
+    }
+
+    @Test(expected = NoHostAvailableException.class)
+    public void testBulkLoader_WithArgs6() throws Throwable
+    {
+        ToolResult tool = ToolRunner.invokeClass(BulkLoader.class,
+                                                 "-d",
+                                                 "127.9.9.1:9041",
+                                                 "--throttle-mib",
+                                                 "3",
+                                                 "--inter-dc-throttle-mib",
+                                                 "4",
+                                                 "--entire-sstable-throttle-mib",
+                                                 "5",
+                                                 "--entire-sstable-inter-dc-throttle-mib",
+                                                 "6",
+                                                 OfflineToolUtils.sstableDirName("legacy_sstables", "legacy_ma_simple"));
+        assertEquals(-1, tool.getExitCode());
+        assertEquals(3 * 1024 * 1024, DatabaseDescriptor.getStreamThroughputOutboundBytesPerSec(), 0.0);
+        assertEquals(4 * 1024 * 1024, DatabaseDescriptor.getInterDCStreamThroughputOutboundBytesPerSec(), 0.0);
+        assertEquals(5, DatabaseDescriptor.getEntireSSTableStreamThroughputOutboundMebibytesPerSec(), 0.0);
+        assertEquals(6, DatabaseDescriptor.getEntireSSTableInterDCStreamThroughputOutboundMebibytesPerSec(), 0.0);
         throw tool.getException().getCause().getCause().getCause();
     }
 }

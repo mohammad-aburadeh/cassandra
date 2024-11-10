@@ -49,11 +49,6 @@ public abstract class PredefinedOperation extends PartitionOperation
         return new DataSpec(generator, seedManager, new DistributionFixed(1), rowPopulationCount, 1);
     }
 
-    public boolean isCql3()
-    {
-        return settings.mode.cqlVersion == CqlVersion.CQL3;
-    }
-
     protected ByteBuffer getKey()
     {
         return (ByteBuffer) partitions.get(0).getPartitionKey(0);

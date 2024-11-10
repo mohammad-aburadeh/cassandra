@@ -34,6 +34,8 @@ import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.rows.*;
 import org.apache.cassandra.io.sstable.ISSTableScanner;
+import org.apache.cassandra.io.sstable.SSTableId;
+import org.apache.cassandra.io.sstable.SSTableIdFactory;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.schema.CompactionParams;
 import org.apache.cassandra.schema.CompactionParams.TombstoneOption;
@@ -53,7 +55,7 @@ public class GcCompactionTest extends CQLTester
     }
 
     @Override
-    protected UntypedResultSet execute(String query, Object... values) throws Throwable
+    protected UntypedResultSet execute(String query, Object... values)
     {
         return executeFormattedQuery(formatQuery(KEYSPACE_PER_TEST, query), values);
     }
@@ -213,7 +215,7 @@ public class GcCompactionTest extends CQLTester
       flush();
       assertEquals(1, cfs.getLiveSSTables().size());
       SSTableReader table = cfs.getLiveSSTables().iterator().next();
-      int gen = table.descriptor.generation;
+      SSTableId gen = table.descriptor.id;
       assertEquals(KEY_COUNT * CLUSTERING_COUNT, countRows(table));
 
       assertEquals(0, table.getSSTableLevel()); // flush writes to L0
@@ -224,8 +226,8 @@ public class GcCompactionTest extends CQLTester
 
       assertEquals(1, cfs.getLiveSSTables().size());
       SSTableReader collected = cfs.getLiveSSTables().iterator().next();
-      int collectedGen = collected.descriptor.generation;
-      assertTrue(collectedGen > gen);
+      SSTableId collectedGen = collected.descriptor.id;
+      assertTrue(SSTableIdFactory.COMPARATOR.compare(collectedGen, gen) > 0);
       assertEquals(KEY_COUNT * CLUSTERING_COUNT, countRows(collected));
 
       assertEquals(0, collected.getSSTableLevel()); // garbagecollect should leave the LCS level where it was
@@ -234,8 +236,8 @@ public class GcCompactionTest extends CQLTester
 
       assertEquals(1, cfs.getLiveSSTables().size());
       SSTableReader compacted = cfs.getLiveSSTables().iterator().next();
-      int compactedGen = compacted.descriptor.generation;
-      assertTrue(compactedGen > collectedGen);
+      SSTableId compactedGen = compacted.descriptor.id;
+      assertTrue(SSTableIdFactory.COMPARATOR.compare(compactedGen, collectedGen) > 0);
       assertEquals(KEY_COUNT * CLUSTERING_COUNT, countRows(compacted));
 
       assertEquals(1, compacted.getSSTableLevel()); // full compaction with LCS should move to L1
@@ -245,7 +247,7 @@ public class GcCompactionTest extends CQLTester
 
       assertEquals(1, cfs.getLiveSSTables().size());
       SSTableReader collected2 = cfs.getLiveSSTables().iterator().next();
-      assertTrue(collected2.descriptor.generation > compactedGen);
+      assertTrue(SSTableIdFactory.COMPARATOR.compare(collected2.descriptor.id, compactedGen) > 0);
       assertEquals(KEY_COUNT * CLUSTERING_COUNT, countRows(collected2));
 
       assertEquals(1, collected2.getSSTableLevel()); // garbagecollect should leave the LCS level where it was
@@ -304,7 +306,7 @@ public class GcCompactionTest extends CQLTester
         assertEquals(CompactionManager.AllSSTableOpStatus.SUCCESSFUL, status);
 
         SSTableReader[] tables = cfs.getLiveSSTables().toArray(new SSTableReader[0]);
-        Arrays.sort(tables, (o1, o2) -> Integer.compare(o1.descriptor.generation, o2.descriptor.generation));  // by order of compaction
+        Arrays.sort(tables, SSTableReader.idComparator);  // by order of compaction
 
         // Make sure deleted data was removed
         assertTrue(rowCount0 > countRows(tables[0]));
@@ -447,11 +449,11 @@ public class GcCompactionTest extends CQLTester
         createTable("create table %s (k int, c1 int, primary key (k, c1)) with compaction = {'class': 'SizeTieredCompactionStrategy', 'provide_overlapping_tombstones':'row'}");
         execute("delete from %s where k = 1");
         Set<SSTableReader> readers = new HashSet<>(getCurrentColumnFamilyStore().getLiveSSTables());
-        getCurrentColumnFamilyStore().forceBlockingFlush();
+        flush();
         SSTableReader oldSSTable = getNewTable(readers);
         Thread.sleep(2000);
         execute("delete from %s where k = 1");
-        getCurrentColumnFamilyStore().forceBlockingFlush();
+        flush();
         SSTableReader newTable = getNewTable(readers);
 
         CompactionManager.instance.forceUserDefinedCompaction(oldSSTable.getFilename());
@@ -505,14 +507,14 @@ public class GcCompactionTest extends CQLTester
 
     int countTombstoneMarkers(SSTableReader reader)
     {
-        int nowInSec = FBUtilities.nowInSeconds();
+        long nowInSec = FBUtilities.nowInSeconds();
         return count(reader, x -> x.isRangeTombstoneMarker() || x.isRow() && ((Row) x).hasDeletion(nowInSec) ? 1 : 0, x -> x.partitionLevelDeletion().isLive() ? 0 : 1);
     }
 
     int countRows(SSTableReader reader)
     {
         boolean enforceStrictLiveness = reader.metadata().enforceStrictLiveness();
-        int nowInSec = FBUtilities.nowInSeconds();
+        long nowInSec = FBUtilities.nowInSeconds();
         return count(reader, x -> x.isRow() && ((Row) x).hasLiveData(nowInSec, enforceStrictLiveness) ? 1 : 0, x -> 0);
     }
 

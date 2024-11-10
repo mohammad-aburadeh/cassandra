@@ -18,7 +18,6 @@
 
 package org.apache.cassandra.hints;
 
-import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -44,6 +43,7 @@ import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.db.marshal.AsciiType;
 import org.apache.cassandra.db.marshal.BytesType;
 import org.apache.cassandra.io.FSWriteError;
+import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.schema.Schema;
@@ -166,7 +166,7 @@ public class HintsMaker
                 prop.setProperty(CFID_PROPERTY, Schema.instance.getTableMetadata(KEYSPACE, TABLE).id.toString());
                 prop.setProperty(CELLS_PROPERTY, Integer.toString(cells.get()));
                 prop.setProperty(HASH_PROPERTY, Integer.toString(hash.get()));
-                prop.store(new FileOutputStream(new File(dataDir, PROPERTIES_FILE)),
+                prop.store(new FileOutputStream(new File(dataDir, PROPERTIES_FILE).toJavaIOFile()),
                            "Hints, version " + FBUtilities.getReleaseVersionString());
 
                 System.out.println("Done");
@@ -230,6 +230,8 @@ public class HintsMaker
                 dataSource.flip();
             }
 
+            SchemaLoader.loadSchema();
+
             TableMetadata metadata = TableMetadata.builder(KEYSPACE, TABLE)
                                                   .addPartitionKeyColumn("key", AsciiType.instance)
                                                   .addClusteringColumn("col", AsciiType.instance)
@@ -238,7 +240,6 @@ public class HintsMaker
                                                   .compression(SchemaLoader.getCompressionParameters())
                                                   .build();
 
-            SchemaLoader.loadSchema();
             SchemaLoader.createKeyspace(KEYSPACE, KeyspaceParams.simple(1), metadata);
         }
 

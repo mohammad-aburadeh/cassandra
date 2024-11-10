@@ -139,7 +139,8 @@ public class IsolatedJmx
 
     private void waitForJmxAvailability(Map<String, ?> env)
     {
-        try (JMXConnector ignored = JMXUtil.getJmxConnector(config, 20, env)) {
+        try (JMXConnector ignored = JMXUtil.getJmxConnector(config, 20, env))
+        {
             // Do nothing - JMXUtil now retries
         }
         catch (IOException iex)
